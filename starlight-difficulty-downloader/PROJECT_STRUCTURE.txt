@@ -1,0 +1,47 @@
+starlight-difficulty-downloader/
+├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   └── feature_request.yml
+│   └── workflows/
+│       └── ci.yml
+├── docs/
+│   ├── .nojekyll
+│   ├── index.html
+│   └── assets/
+│       └── starlight-difficulty-downloader.js
+├── dist/
+│   ├── SHA256SUMS.txt
+│   └── starlight-difficulty-downloader.js
+├── scripts/
+│   ├── build.mjs
+│   └── check.mjs
+├── src/
+│   ├── api.js
+│   ├── app.js
+│   ├── config.js
+│   ├── history.js
+│   ├── i18n.js
+│   ├── main.js
+│   ├── matcher.js
+│   ├── queue.js
+│   ├── storage.js
+│   ├── styles.js
+│   ├── ui.js
+│   └── utils.js
+├── tests/
+│   ├── i18n.test.js
+│   ├── matcher.test.js
+│   ├── queue.test.js
+│   └── storage-history.test.js
+├── .editorconfig
+├── .gitignore
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── LICENSE
+├── package-lock.json
+├── package.json
+├── PROJECT_STRUCTURE.txt
+├── README.md
+├── README.ja.md
+└── README.ko.md

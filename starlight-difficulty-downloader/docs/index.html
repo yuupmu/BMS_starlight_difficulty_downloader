@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Starlight Difficulty Downloader</title>
+  <style>
+    :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans KR","Noto Sans JP",sans-serif}
+    *{box-sizing:border-box}
+    body{margin:0;background:#080d18;color:#eef2ff;line-height:1.65}
+    main{max-width:940px;margin:0 auto;padding:30px 22px 72px}
+    .topbar{display:flex;align-items:center;gap:16px;margin-bottom:34px}
+    .topbar .grow{flex:1}
+    select,button{font:inherit;color:#eef2ff;background:#172033;border:1px solid #475569;border-radius:9px;padding:9px 11px;cursor:pointer}
+    button:hover{background:#24314a}
+    h1{font-size:clamp(28px,5vw,42px);line-height:1.18;margin:0 0 10px}
+    h2{margin:0 0 10px;font-size:21px}
+    p{margin:8px 0 14px}
+    .lead{font-size:18px;color:#cbd5e1;max-width:760px}
+    .card{background:#111827;border:1px solid #334155;border-radius:16px;padding:20px;margin:18px 0}
+    .bookmark{display:inline-flex;align-items:center;justify-content:center;background:#4f46e5;color:#fff!important;border:1px solid #818cf8;border-radius:12px;padding:13px 18px;text-decoration:none;font-weight:750;box-shadow:0 10px 28px rgba(79,70,229,.35);cursor:grab;margin:6px 8px 6px 0}
+    .bookmark.secondary{background:#164e63;border-color:#0e7490}
+    code{background:#050914;border:1px solid #293548;border-radius:6px;padding:2px 6px}
+    ol{padding-left:24px}
+    li{margin:8px 0}
+    .notice{border-left:4px solid #f59e0b;padding:8px 0 8px 14px;color:#fde68a}
+    .good{border-left-color:#10b981;color:#a7f3d0}
+    .small{font-size:13px;color:#94a3b8}
+    .status{min-height:1.6em;color:#a7f3d0;font-weight:650;margin-left:8px}
+    .buttonrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    textarea{width:100%;min-height:150px;background:#050914;color:#dbeafe;border:1px solid #334155;border-radius:10px;padding:12px;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical}
+    a{color:#93c5fd}
+    [hidden]{display:none!important}
+  </style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <strong>Starlight Difficulty Downloader</strong>
+    <span class="grow"></span>
+    <label><span id="language-label">Language</span> <select id="language"><option value="ko">한국어</option><option value="ja">日本語</option><option value="en">English</option></select></label>
+  </div>
+
+  <h1 id="hero-title"></h1>
+  <p id="hero-lead" class="lead"></p>
+
+  <section class="card">
+    <h2 id="install-title"></h2>
+    <p id="install-intro"></p>
+    <p><a id="loader-bookmark" class="bookmark" href="#"></a><a id="standalone-bookmark" class="bookmark secondary" href="#" hidden></a></p>
+    <p id="install-note" class="small"></p>
+    <p id="standalone-note" class="small"></p>
+  </section>
+
+  <section class="card">
+    <h2 id="usage-title"></h2>
+    <ol>
+      <li id="usage-1"></li>
+      <li id="usage-2"></li>
+      <li id="usage-3"></li>
+      <li id="usage-4"></li>
+    </ol>
+    <p><a id="songs-link" href="https://horieyuuka.github.io/Songs" target="_blank" rel="noopener noreferrer">BMS Library Songs</a></p>
+  </section>
+
+  <section class="card">
+    <h2 id="resume-title"></h2>
+    <p id="resume-body" class="notice good"></p>
+    <p id="completion-note" class="notice"></p>
+  </section>
+
+  <section class="card">
+    <h2 id="manual-title"></h2>
+    <div class="buttonrow">
+      <button id="copy-loader"></button>
+      <button id="copy-standalone" disabled></button>
+      <button id="copy-console" disabled></button>
+      <span id="copy-status" class="status"></span>
+    </div>
+    <details>
+      <summary id="code-summary"></summary>
+      <textarea id="code" readonly></textarea>
+    </details>
+  </section>
+
+  <p id="footer" class="small"></p>
+</main>
+<script>
+(() => {
+  'use strict';
+
+  const VERSION = '1.0.0';
+  const ASSET_URL = new URL('./assets/starlight-difficulty-downloader.js', location.href).href;
+  const SONGS_URL = 'https://horieyuuka.github.io/Songs';
+  const LANGUAGE_KEY = 'starlight-difficulty-downloader:installer-language';
+  const text = {
+    ko: {
+      language: '언어',
+      heroTitle: 'Starlight 난이도 다운로더',
+      heroLead: 'Starlight sr0~sr13을 선택해 BMS Library의 곡 본체와 차분을 검색하고, 서버 제한에 맞춰 순차 다운로드하는 북마크 도구입니다.',
+      installTitle: '설치',
+      installIntro: '북마크바가 보이지 않으면 ⌘/Ctrl + Shift + B를 누른 뒤 아래 버튼을 북마크바로 드래그하세요.',
+      loaderBookmark: '★ Starlight Downloader',
+      standaloneBookmark: '★ Standalone Downloader',
+      installNote: '기본 버튼은 GitHub Pages의 최신 스크립트를 불러오는 짧은 로더입니다.',
+      standaloneNote: 'Standalone 버튼은 전체 코드를 북마크 안에 포함합니다. 페이지 보안 정책 때문에 로더가 실행되지 않을 때 사용하세요.',
+      usageTitle: '사용 방법',
+      usage1: 'BMS Library Songs 페이지를 엽니다.',
+      usage2: '설치한 북마크를 실행합니다.',
+      usage3: '오른쪽 위에서 한국어·日本語·English를 선택하고, 원하는 sr 레벨을 검색합니다.',
+      usage4: '곡을 선택해 대기열에 넣고 다운로드를 시작합니다. 제한이 발생하면 초기화 후 같은 버튼으로 재개합니다.',
+      resumeTitle: '중단 복구와 중복 방지',
+      resumeBody: '대기열, 서버 제한 시각, 브라우저로 전달한 파일 ID를 localStorage에 저장합니다. 페이지를 닫거나 다운로드 제한으로 중단되어도 다음 파일부터 이어가며, 요청 완료 이력과 같은 파일은 자동으로 건너뜁니다.',
+      completionNote: '“요청 완료”는 다운로드 URL이 발급되어 브라우저로 전달됐다는 뜻입니다. 웹페이지는 브라우저나 디스크에서 실제 저장이 끝났는지 확인할 수 없습니다. 실패한 파일은 도구의 다운로드 이력에서 “다시 받기”를 선택하세요.',
+      manualTitle: '수동 설치 및 개발자용',
+      copyLoader: '로더 북마크 코드 복사',
+      copyStandalone: 'Standalone 북마크 코드 복사',
+      copyConsole: '콘솔용 JS 복사',
+      codeSummary: '코드 보기',
+      loadingAsset: '스크립트를 불러오는 중…',
+      ready: '설치 코드가 준비되었습니다.',
+      assetFailure: '스크립트를 불러오지 못했습니다. GitHub Pages 배포 상태를 확인하세요.',
+      copiedLoader: '로더 북마크 코드를 복사했습니다.',
+      copiedStandalone: 'Standalone 북마크 코드를 복사했습니다.',
+      copiedConsole: '콘솔용 JS를 복사했습니다.',
+      copyFailure: '자동 복사에 실패했습니다. 코드 상자에서 직접 복사하세요.',
+      footer: `버전 ${VERSION} · BMS Library 또는 Starlight 난이도표와 공식 제휴된 프로젝트가 아닙니다.`
+    },
+    ja: {
+      language: '言語',
+      heroTitle: 'Starlight 難易度ダウンローダー',
+      heroLead: 'Starlight の sr0〜sr13を選び、BMS Library から曲本体と差分を検索し、サーバー制限に合わせて順番にダウンロード要求を行うブックマークレットです。',
+      installTitle: 'インストール',
+      installIntro: 'ブックマークバーが表示されていない場合は ⌘/Ctrl + Shift + B を押し、下のボタンをブックマークバーへドラッグしてください。',
+      loaderBookmark: '★ Starlight Downloader',
+      standaloneBookmark: '★ Standalone Downloader',
+      installNote: '標準ボタンは GitHub Pages 上の最新スクリプトを読み込む短いローダーです。',
+      standaloneNote: 'Standalone ボタンは全コードをブックマーク内に含みます。ページのセキュリティポリシーでローダーが動かない場合に使用してください。',
+      usageTitle: '使い方',
+      usage1: 'BMS Library の Songs ページを開きます。',
+      usage2: 'インストールしたブックマークレットを実行します。',
+      usage3: '右上で 한국어・日本語・English を選択し、目的の sr レベルを検索します。',
+      usage4: '曲を選んでキューへ追加し、ダウンロードを開始します。制限時は解除後に同じボタンで再開します。',
+      resumeTitle: '中断からの再開と重複防止',
+      resumeBody: 'キュー、サーバー制限の解除時刻、ブラウザーへ送信したファイル ID を localStorage に保存します。ページを閉じたり制限で中断した場合も次のファイルから再開し、送信済み履歴と同じファイルは自動的にスキップします。',
+      completionNote: '「送信済み」はダウンロード URL が発行され、ブラウザーへ渡されたことを意味します。ブラウザーやディスクで保存が完了したかどうかはウェブページから確認できません。失敗したファイルはツールのダウンロード履歴から「再ダウンロード」を選択してください。',
+      manualTitle: '手動インストール・開発者向け',
+      copyLoader: 'ローダーのブックマークコードをコピー',
+      copyStandalone: 'Standalone コードをコピー',
+      copyConsole: 'コンソール用 JS をコピー',
+      codeSummary: 'コードを表示',
+      loadingAsset: 'スクリプトを読み込み中…',
+      ready: 'インストールコードの準備ができました。',
+      assetFailure: 'スクリプトを読み込めませんでした。GitHub Pages の公開状態を確認してください。',
+      copiedLoader: 'ローダーのブックマークコードをコピーしました。',
+      copiedStandalone: 'Standalone コードをコピーしました。',
+      copiedConsole: 'コンソール用 JS をコピーしました。',
+      copyFailure: '自動コピーに失敗しました。コード欄から手動でコピーしてください。',
+      footer: `バージョン ${VERSION} · BMS Library または Starlight 難易度表の公式プロジェクトではありません。`
+    },
+    en: {
+      language: 'Language',
+      heroTitle: 'Starlight Difficulty Downloader',
+      heroLead: 'Choose any Starlight level from sr0 to sr13, search BMS Library for song packages and chart patches, and request downloads sequentially within the server limits.',
+      installTitle: 'Installation',
+      installIntro: 'Show the bookmarks bar with ⌘/Ctrl + Shift + B, then drag a button below onto the bookmarks bar.',
+      loaderBookmark: '★ Starlight Downloader',
+      standaloneBookmark: '★ Standalone Downloader',
+      installNote: 'The primary button is a short loader that fetches the latest script from this GitHub Pages site.',
+      standaloneNote: 'The Standalone button embeds the full script in the bookmark. Use it when a page security policy blocks the hosted loader.',
+      usageTitle: 'Usage',
+      usage1: 'Open the BMS Library Songs page.',
+      usage2: 'Run the bookmarklet you installed.',
+      usage3: 'Choose 한국어, 日本語, or English in the upper-right corner, then search the desired sr level.',
+      usage4: 'Select songs, add them to the queue, and start downloading. If a limit is reached, resume with the same button after the reset.',
+      resumeTitle: 'Resume and duplicate prevention',
+      resumeBody: 'The queue, server reset time, and file IDs handed to the browser are saved in localStorage. After closing the page or hitting a download limit, the tool resumes from the next file and automatically skips IDs already present in request history.',
+      completionNote: '“Requested” means a download URL was issued and handed to the browser. A web page cannot verify that the browser or disk finished saving the file. Use “Download again” in the tool’s Download history for any failed file.',
+      manualTitle: 'Manual installation and developer options',
+      copyLoader: 'Copy loader bookmark code',
+      copyStandalone: 'Copy Standalone bookmark code',
+      copyConsole: 'Copy console JavaScript',
+      codeSummary: 'Show code',
+      loadingAsset: 'Loading the script…',
+      ready: 'Installation code is ready.',
+      assetFailure: 'Could not load the script. Check the GitHub Pages deployment.',
+      copiedLoader: 'Loader bookmark code copied.',
+      copiedStandalone: 'Standalone bookmark code copied.',
+      copiedConsole: 'Console JavaScript copied.',
+      copyFailure: 'Automatic copy failed. Copy the text from the code box manually.',
+      footer: `Version ${VERSION} · This project is not affiliated with BMS Library or the Starlight difficulty table.`
+    }
+  };
+
+  const elements = Object.fromEntries([
+    'language-label','hero-title','hero-lead','install-title','install-intro','loader-bookmark','standalone-bookmark','install-note','standalone-note',
+    'usage-title','usage-1','usage-2','usage-3','usage-4','resume-title','resume-body','completion-note','manual-title','copy-loader','copy-standalone',
+    'copy-console','code-summary','copy-status','code','footer'
+  ].map((id) => [id, document.getElementById(id)]));
+  const languageSelect = document.getElementById('language');
+
+  let bundle = '';
+  let loaderCode = '';
+  let standaloneCode = '';
+
+  function normalizeLanguage(value) {
+    const short = String(value || '').toLowerCase().split(/[-_]/)[0];
+    return ['ko','ja','en'].includes(short) ? short : 'en';
+  }
+
+  function selectedLanguage() {
+    return normalizeLanguage(languageSelect.value);
+  }
+
+  function applyLanguage(language) {
+    const lang = normalizeLanguage(language);
+    const t = text[lang];
+    languageSelect.value = lang;
+    document.documentElement.lang = lang;
+    localStorage.setItem(LANGUAGE_KEY, lang);
+    elements['language-label'].textContent = t.language;
+    elements['hero-title'].textContent = t.heroTitle;
+    elements['hero-lead'].textContent = t.heroLead;
+    elements['install-title'].textContent = t.installTitle;
+    elements['install-intro'].textContent = t.installIntro;
+    elements['loader-bookmark'].textContent = t.loaderBookmark;
+    elements['standalone-bookmark'].textContent = t.standaloneBookmark;
+    elements['install-note'].textContent = t.installNote;
+    elements['standalone-note'].textContent = t.standaloneNote;
+    elements['usage-title'].textContent = t.usageTitle;
+    elements['usage-1'].textContent = t.usage1;
+    elements['usage-2'].textContent = t.usage2;
+    elements['usage-3'].textContent = t.usage3;
+    elements['usage-4'].textContent = t.usage4;
+    elements['resume-title'].textContent = t.resumeTitle;
+    elements['resume-body'].textContent = t.resumeBody;
+    elements['completion-note'].textContent = t.completionNote;
+    elements['manual-title'].textContent = t.manualTitle;
+    elements['copy-loader'].textContent = t.copyLoader;
+    elements['copy-standalone'].textContent = t.copyStandalone;
+    elements['copy-console'].textContent = t.copyConsole;
+    elements['code-summary'].textContent = t.codeSummary;
+    elements.footer.textContent = t.footer;
+    elements['copy-status'].textContent = bundle ? t.ready : t.loadingAsset;
+    document.title = t.heroTitle;
+  }
+
+  function makeLoaderCode() {
+    const failureMessage = text[selectedLanguage()].assetFailure.replaceAll("'", "\\'");
+    const source = `(()=>{const id='starlight-difficulty-downloader-loader';document.getElementById(id)?.remove();const s=document.createElement('script');s.id=id;s.src=${JSON.stringify(ASSET_URL)}+'?v='+Date.now();s.onload=()=>s.remove();s.onerror=()=>alert('${failureMessage}');document.documentElement.appendChild(s)})()`;
+    return 'javascript:' + encodeURIComponent(source);
+  }
+
+  async function copy(value, successKey) {
+    const t = text[selectedLanguage()];
+    try {
+      await navigator.clipboard.writeText(value);
+      elements['copy-status'].textContent = t[successKey];
+    } catch {
+      elements.code.value = value;
+      elements.code.focus();
+      elements.code.select();
+      try {
+        document.execCommand('copy');
+        elements['copy-status'].textContent = t[successKey];
+      } catch {
+        elements['copy-status'].textContent = t.copyFailure;
+      }
+    }
+  }
+
+  async function loadBundle() {
+    try {
+      const response = await fetch(ASSET_URL, { cache: 'no-store' });
+      if (!response.ok) throw new Error(String(response.status));
+      bundle = await response.text();
+      standaloneCode = 'javascript:' + encodeURIComponent(bundle);
+      elements['standalone-bookmark'].href = standaloneCode;
+      elements['standalone-bookmark'].hidden = false;
+      elements['copy-standalone'].disabled = false;
+      elements['copy-console'].disabled = false;
+      elements.code.value = bundle;
+      elements['copy-status'].textContent = text[selectedLanguage()].ready;
+    } catch (error) {
+      console.error(error);
+      elements['copy-status'].textContent = text[selectedLanguage()].assetFailure;
+    }
+  }
+
+  function refreshLoaderCode() {
+    loaderCode = makeLoaderCode();
+    elements['loader-bookmark'].href = loaderCode;
+  }
+
+  const savedLanguage = localStorage.getItem(LANGUAGE_KEY);
+  const initialLanguage = normalizeLanguage(savedLanguage || navigator.language);
+  applyLanguage(initialLanguage);
+  refreshLoaderCode();
+  loadBundle();
+
+  languageSelect.addEventListener('change', () => {
+    applyLanguage(languageSelect.value);
+    refreshLoaderCode();
+  });
+  elements['copy-loader'].addEventListener('click', () => copy(loaderCode, 'copiedLoader'));
+  elements['copy-standalone'].addEventListener('click', () => copy(standaloneCode, 'copiedStandalone'));
+  elements['copy-console'].addEventListener('click', () => copy(bundle, 'copiedConsole'));
+  document.getElementById('songs-link').href = SONGS_URL;
+})();
+</script>
+</body>
+</html>
