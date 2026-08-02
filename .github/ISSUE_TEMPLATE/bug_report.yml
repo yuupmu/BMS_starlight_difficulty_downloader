@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible problem with the downloader.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include the visible error and the selected Starlight level.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Browser
+      placeholder: Chrome 140, Firefox 142, Safari 19, etc.
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Stage
+      options:
+        - Installation or startup
+        - Searching
+        - Download request
+        - Browser file transfer
+        - Queue or history restore
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true

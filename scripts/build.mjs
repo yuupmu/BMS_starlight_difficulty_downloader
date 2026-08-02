@@ -22,7 +22,7 @@ async function collectJavaScriptFiles(directory, base = directory) {
 
 function indent(source, spaces = 4) {
   const prefix = ' '.repeat(spaces);
-  return source.split('\n').map((line) => `${prefix}${line}`).join('\n');
+  return source.split('\n').map((line) => (line ? `${prefix}${line}` : '')).join('\n');
 }
 
 const files = await collectJavaScriptFiles(sourceDirectory);

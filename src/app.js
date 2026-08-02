@@ -12,6 +12,7 @@ const {
   getFallbacks,
   findMatches,
   itemDisplay,
+  scoreForResult,
   selectionItemsForResult,
   downloadCoverage
 } = require('./matcher');
@@ -188,7 +189,7 @@ async function start() {
       }
       if (isCancelled()) break;
 
-      const bestScore = Math.max(song.matches[0]?.score || 0, sabun.matches[0]?.score || 0);
+      const bestScore = scoreForResult({ chart, song, sabun });
       const fallbacks = getFallbacks(chart);
       let classification;
       if (bestScore) {

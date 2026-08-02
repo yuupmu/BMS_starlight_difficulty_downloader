@@ -82,6 +82,14 @@ function bestAvailable(result) {
   return candidates.sort((a, b) => b.score - a.score)[0] || null;
 }
 
+function scoreForResult(result) {
+  const songScore = Number(result?.song?.matches?.[0]?.score) || 0;
+  const sabunScore = Number(result?.sabun?.matches?.[0]?.score) || 0;
+  return result?.chart?.url_diff
+    ? Math.min(songScore, sabunScore)
+    : Math.max(songScore, sabunScore);
+}
+
 function selectionItemsForResult(result) {
   const selections = [];
   const topSong = result?.song?.matches?.[0];
@@ -121,13 +129,23 @@ function selectionItemsForResult(result) {
 
 function downloadCoverage(result, history) {
   const selections = selectionItemsForResult(result);
-  if (!selections.length) return { done: 0, total: 0, all: false, partial: false, selections };
-  const done = selections.filter((item) => history.has(item.type, item.id)).length;
+  const hasRequestedMatch = (type, matches) => (matches || []).some((match) => (
+    match?.item?.id && history.has(type, match.item.id)
+  ));
+  const needsPatch = Boolean(result?.chart?.url_diff);
+  const total = needsPatch ? 2 : (selections.length ? 1 : 0);
+  const done = needsPatch
+    ? Number(hasRequestedMatch('song', result?.song?.matches))
+      + Number(hasRequestedMatch('sabun', result?.sabun?.matches))
+    : Number(
+      hasRequestedMatch('song', result?.song?.matches)
+      || hasRequestedMatch('sabun', result?.sabun?.matches)
+    );
   return {
     done,
-    total: selections.length,
-    all: done === selections.length,
-    partial: done > 0 && done < selections.length,
+    total,
+    all: total > 0 && done === total,
+    partial: done > 0 && done < total,
     selections
   };
 }
@@ -146,11 +164,13 @@ async function findMatches(options) {
   const candidates = new Map();
   let lastError = '';
 
-  for (const query of queries) {
+  for (let queryIndex = 0; queryIndex < queries.length; queryIndex += 1) {
+    const query = queries[queryIndex];
     if (isCancelled()) break;
     try {
       const items = await api.search(sourceType, query);
       if (isCancelled()) break;
+      lastError = '';
       for (const item of items) {
         if (!item?.id) continue;
         const score = scoreItem(item, chart, query);
@@ -162,7 +182,7 @@ async function findMatches(options) {
     } catch (error) {
       lastError = error?.message || String(error);
     }
-    if (delayMs > 0) await sleep(delayMs);
+    if (delayMs > 0 && queryIndex < queries.length - 1 && !isCancelled()) await sleep(delayMs);
   }
 
   return {
@@ -185,6 +205,7 @@ module.exports = {
   classify,
   getFallbacks,
   bestAvailable,
+  scoreForResult,
   selectionItemsForResult,
   downloadCoverage,
   findMatches,

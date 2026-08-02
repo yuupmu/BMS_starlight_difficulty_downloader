@@ -213,12 +213,28 @@
     return normalizeLanguage(languageSelect.value);
   }
 
+  function loadSavedLanguage() {
+    try {
+      return localStorage.getItem(LANGUAGE_KEY);
+    } catch {
+      return '';
+    }
+  }
+
+  function saveLanguage(language) {
+    try {
+      localStorage.setItem(LANGUAGE_KEY, language);
+    } catch {
+      // The installer remains usable when browser storage is unavailable.
+    }
+  }
+
   function applyLanguage(language) {
     const lang = normalizeLanguage(language);
     const t = text[lang];
     languageSelect.value = lang;
     document.documentElement.lang = lang;
-    localStorage.setItem(LANGUAGE_KEY, lang);
+    saveLanguage(lang);
     elements['language-label'].textContent = t.language;
     elements['hero-title'].textContent = t.heroTitle;
     elements['hero-lead'].textContent = t.heroLead;
@@ -262,7 +278,7 @@
       elements.code.focus();
       elements.code.select();
       try {
-        document.execCommand('copy');
+        if (!document.execCommand('copy')) throw new Error('Copy command was rejected.');
         elements['copy-status'].textContent = t[successKey];
       } catch {
         elements['copy-status'].textContent = t.copyFailure;
@@ -293,7 +309,7 @@
     elements['loader-bookmark'].href = loaderCode;
   }
 
-  const savedLanguage = localStorage.getItem(LANGUAGE_KEY);
+  const savedLanguage = loadSavedLanguage();
   const initialLanguage = normalizeLanguage(savedLanguage || navigator.language);
   applyLanguage(initialLanguage);
   refreshLoaderCode();
