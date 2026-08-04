@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>Starlight Difficulty Downloader</title>
+  <title>BMS Difficulty Table Downloader</title>
   <style>
     :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans KR","Noto Sans JP",sans-serif}
     *{box-sizing:border-box}
@@ -37,7 +37,7 @@
 <body>
 <main>
   <div class="topbar">
-    <strong>Starlight Difficulty Downloader</strong>
+    <strong>BMS Difficulty Table Downloader</strong>
     <span class="grow"></span>
     <label><span id="language-label">Language</span> <select id="language"><option value="ko">한국어</option><option value="ja">日本語</option><option value="en">English</option></select></label>
   </div>
@@ -97,18 +97,18 @@
   const text = {
     ko: {
       language: '언어',
-      heroTitle: 'Starlight 난이도 다운로더',
-      heroLead: 'Starlight sr0~sr13을 선택해 BMS Library의 곡 본체와 차분을 검색하고, 서버 제한에 맞춰 순차 다운로드하는 북마크 도구입니다.',
+      heroTitle: 'BMS 난이도표 다운로더',
+      heroLead: 'Starlight를 비롯한 6개 난이도표와 레벨을 선택해 BMS Library의 곡 본체와 차분을 검색하고 순차 다운로드하는 북마크 도구입니다.',
       installTitle: '설치',
       installIntro: '북마크바가 보이지 않으면 ⌘/Ctrl + Shift + B를 누른 뒤 아래 버튼을 북마크바로 드래그하세요.',
-      loaderBookmark: '★ Starlight Downloader',
+      loaderBookmark: '★ BMS Table Downloader',
       standaloneBookmark: '★ Standalone Downloader',
       installNote: '기본 버튼은 GitHub Pages의 최신 스크립트를 불러오는 짧은 로더입니다.',
       standaloneNote: 'Standalone 버튼은 전체 코드를 북마크 안에 포함합니다. 페이지 보안 정책 때문에 로더가 실행되지 않을 때 사용하세요.',
       usageTitle: '사용 방법',
       usage1: 'BMS Library Songs 페이지를 엽니다.',
       usage2: '설치한 북마크를 실행합니다.',
-      usage3: '오른쪽 위에서 한국어·日本語·English를 선택하고, 원하는 sr 레벨을 검색합니다.',
+      usage3: '오른쪽 위에서 언어를 고른 뒤, 원하는 난이도표와 레벨을 선택해 검색합니다.',
       usage4: '곡을 선택해 대기열에 넣고 다운로드를 시작합니다. 제한이 발생하면 초기화 후 같은 버튼으로 재개합니다.',
       resumeTitle: '중단 복구와 중복 방지',
       resumeBody: '대기열, 서버 제한 시각, 브라우저로 전달한 파일 ID를 localStorage에 저장합니다. 페이지를 닫거나 다운로드 제한으로 중단되어도 다음 파일부터 이어가며, 요청 완료 이력과 같은 파일은 자동으로 건너뜁니다.',
@@ -125,22 +125,22 @@
       copiedStandalone: 'Standalone 북마크 코드를 복사했습니다.',
       copiedConsole: '콘솔용 JS를 복사했습니다.',
       copyFailure: '자동 복사에 실패했습니다. 코드 상자에서 직접 복사하세요.',
-      footer: `버전 ${VERSION} · BMS Library 또는 Starlight 난이도표와 공식 제휴된 프로젝트가 아닙니다.`
+      footer: `버전 ${VERSION} · BMS Library 또는 수록 난이도표와 공식 제휴된 프로젝트가 아닙니다.`
     },
     ja: {
       language: '言語',
-      heroTitle: 'Starlight 難易度ダウンローダー',
-      heroLead: 'Starlight の sr0〜sr13を選び、BMS Library から曲本体と差分を検索し、サーバー制限に合わせて順番にダウンロード要求を行うブックマークレットです。',
+      heroTitle: 'BMS 難易度表ダウンローダー',
+      heroLead: 'Starlight を含む6つの難易度表とレベルを選び、BMS Library から曲本体と差分を検索して順番にダウンロード要求を行います。',
       installTitle: 'インストール',
       installIntro: 'ブックマークバーが表示されていない場合は ⌘/Ctrl + Shift + B を押し、下のボタンをブックマークバーへドラッグしてください。',
-      loaderBookmark: '★ Starlight Downloader',
+      loaderBookmark: '★ BMS Table Downloader',
       standaloneBookmark: '★ Standalone Downloader',
       installNote: '標準ボタンは GitHub Pages 上の最新スクリプトを読み込む短いローダーです。',
       standaloneNote: 'Standalone ボタンは全コードをブックマーク内に含みます。ページのセキュリティポリシーでローダーが動かない場合に使用してください。',
       usageTitle: '使い方',
       usage1: 'BMS Library の Songs ページを開きます。',
       usage2: 'インストールしたブックマークレットを実行します。',
-      usage3: '右上で 한국어・日本語・English を選択し、目的の sr レベルを検索します。',
+      usage3: '右上で言語を選び、目的の難易度表とレベルを選択して検索します。',
       usage4: '曲を選んでキューへ追加し、ダウンロードを開始します。制限時は解除後に同じボタンで再開します。',
       resumeTitle: '中断からの再開と重複防止',
       resumeBody: 'キュー、サーバー制限の解除時刻、ブラウザーへ送信したファイル ID を localStorage に保存します。ページを閉じたり制限で中断した場合も次のファイルから再開し、送信済み履歴と同じファイルは自動的にスキップします。',
@@ -157,22 +157,22 @@
       copiedStandalone: 'Standalone コードをコピーしました。',
       copiedConsole: 'コンソール用 JS をコピーしました。',
       copyFailure: '自動コピーに失敗しました。コード欄から手動でコピーしてください。',
-      footer: `バージョン ${VERSION} · BMS Library または Starlight 難易度表の公式プロジェクトではありません。`
+      footer: `バージョン ${VERSION} · BMS Library または収録難易度表の公式プロジェクトではありません。`
     },
     en: {
       language: 'Language',
-      heroTitle: 'Starlight Difficulty Downloader',
-      heroLead: 'Choose any Starlight level from sr0 to sr13, search BMS Library for song packages and chart patches, and request downloads sequentially within the server limits.',
+      heroTitle: 'BMS Difficulty Table Downloader',
+      heroLead: 'Choose a table and level from six supported BMS difficulty tables, search BMS Library for song packages and chart patches, and request downloads sequentially.',
       installTitle: 'Installation',
       installIntro: 'Show the bookmarks bar with ⌘/Ctrl + Shift + B, then drag a button below onto the bookmarks bar.',
-      loaderBookmark: '★ Starlight Downloader',
+      loaderBookmark: '★ BMS Table Downloader',
       standaloneBookmark: '★ Standalone Downloader',
       installNote: 'The primary button is a short loader that fetches the latest script from this GitHub Pages site.',
       standaloneNote: 'The Standalone button embeds the full script in the bookmark. Use it when a page security policy blocks the hosted loader.',
       usageTitle: 'Usage',
       usage1: 'Open the BMS Library Songs page.',
       usage2: 'Run the bookmarklet you installed.',
-      usage3: 'Choose 한국어, 日本語, or English in the upper-right corner, then search the desired sr level.',
+      usage3: 'Choose a language, then select the desired difficulty table and level before searching.',
       usage4: 'Select songs, add them to the queue, and start downloading. If a limit is reached, resume with the same button after the reset.',
       resumeTitle: 'Resume and duplicate prevention',
       resumeBody: 'The queue, server reset time, and file IDs handed to the browser are saved in localStorage. After closing the page or hitting a download limit, the tool resumes from the next file and automatically skips IDs already present in request history.',
@@ -189,7 +189,7 @@
       copiedStandalone: 'Standalone bookmark code copied.',
       copiedConsole: 'Console JavaScript copied.',
       copyFailure: 'Automatic copy failed. Copy the text from the code box manually.',
-      footer: `Version ${VERSION} · This project is not affiliated with BMS Library or the Starlight difficulty table.`
+      footer: `Version ${VERSION} · This project is not affiliated with BMS Library or the included difficulty tables.`
     }
   };
 

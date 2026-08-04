@@ -33,7 +33,7 @@ for (const id of files) {
 }
 
 const bundle = `/*!
- * Starlight Difficulty Downloader
+ * BMS Difficulty Table Downloader
  * Built from the files in /src. Do not edit this generated file directly.
  */
 (function () {

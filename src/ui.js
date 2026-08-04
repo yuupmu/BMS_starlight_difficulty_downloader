@@ -2,6 +2,7 @@
 
 const { CONFIG } = require('./config');
 const { buildStyles } = require('./styles');
+const { formatLevel } = require('./tables');
 const {
   escapeHtml,
   formatLocalDate,
@@ -40,9 +41,12 @@ function createUi(options) {
     <header>
       <h2 id="sld-title"></h2>
       <span class="sld-muted">v${escapeHtml(config.version)}</span>
+      <label class="sld-inline"><strong id="sld-table-label"></strong><select id="sld-table"></select></label>
       <label class="sld-inline"><strong id="sld-level-label"></strong><select id="sld-level" disabled><option></option></select></label>
       <button id="sld-load-level" class="sld-primary" disabled></button>
+      <button id="sld-refresh-level" disabled></button>
       <button id="sld-select-matched"></button>
+      <button id="sld-clear-selection"></button>
       <button id="sld-queue-selected" class="sld-primary"></button>
       <button id="sld-export"></button>
       <button id="sld-stop" class="sld-danger"></button>
@@ -58,6 +62,7 @@ function createUi(options) {
       <span class="grow"></span>
       <div class="sld-filters">
         <button class="sld-filter sld-active" data-filter="all"></button>
+        <button class="sld-filter" data-filter="pending"></button>
         <button class="sld-filter" data-filter="matched"></button>
         <button class="sld-filter" data-filter="review"></button>
         <button class="sld-filter" data-filter="missing"></button>
@@ -68,7 +73,9 @@ function createUi(options) {
       <strong id="sld-queue-title"></strong>
       <span id="sld-queue-count" class="sld-muted"></span>
       <span id="sld-history-count" class="sld-muted"></span>
-      <label class="sld-inline"><span id="sld-batch-prefix"></span><select id="sld-batch-size">${config.allowedBatchSizes.map((size) => `<option value="${size}">${size}</option>`).join('')}</select><span id="sld-batch-suffix"></span></label>
+      <label class="sld-inline"><span id="sld-batch-prefix"></span><select id="sld-batch-size">${config.allowedBatchSizes.map((size) => `<option value="${size}">${size}</option>`).join('')}<option value="${escapeHtml(config.safeBatchValue)}"></option></select><span id="sld-batch-suffix"></span></label>
+      <button id="sld-download-folder"></button>
+      <button id="sld-browser-downloads" hidden></button>
       <button id="sld-run-queue" class="sld-primary"></button>
       <button id="sld-clear-queue"></button>
       <span id="sld-queue-message" class="sld-queue-message sld-muted"></span>
@@ -113,10 +120,14 @@ function createUi(options) {
   const get = (selector) => panel.querySelector(selector);
   const els = {
     title: get('#sld-title'),
+    tableLabel: get('#sld-table-label'),
+    table: get('#sld-table'),
     levelLabel: get('#sld-level-label'),
     level: get('#sld-level'),
     loadLevel: get('#sld-load-level'),
+    refreshLevel: get('#sld-refresh-level'),
     selectMatched: get('#sld-select-matched'),
+    clearSelection: get('#sld-clear-selection'),
     queueSelected: get('#sld-queue-selected'),
     export: get('#sld-export'),
     stop: get('#sld-stop'),
@@ -134,6 +145,8 @@ function createUi(options) {
     historyCount: get('#sld-history-count'),
     batchPrefix: get('#sld-batch-prefix'),
     batchSize: get('#sld-batch-size'),
+    downloadFolder: get('#sld-download-folder'),
+    browserDownloads: get('#sld-browser-downloads'),
     batchSuffix: get('#sld-batch-suffix'),
     runQueue: get('#sld-run-queue'),
     clearQueue: get('#sld-clear-queue'),
@@ -174,6 +187,7 @@ function createUi(options) {
   function rowMatchesFilter(result) {
     if (state.selectedFilter === 'all') return true;
     const coverage = downloadCoverage(result, history);
+    if (state.selectedFilter === 'pending') return !coverage.all;
     if (state.selectedFilter === 'requested') return coverage.all;
     return result.classification?.key === state.selectedFilter;
   }
@@ -259,7 +273,7 @@ function createUi(options) {
       if (downloadCoverage(row, history).all) stats.requested += 1;
     }
     els.counts.textContent = translator.t('status.counts', {
-      level: state.selectedLevel,
+      levelLabel: formatLevel(state.selectedTable, state.selectedLevel),
       total: state.charts.length,
       matched: stats.matched,
       review: stats.review,
@@ -306,13 +320,13 @@ function createUi(options) {
     els.historyCount.textContent = translator.t('queue.historyCount', { count: history.size() });
     const nextItem = state.downloadQueue[0];
     const defaultQueueMessage = nextItem
-      ? `${translator.t('queue.saved')} ${translator.t('queue.nextItem', { level: nextItem.level, title: nextItem.title })}`
+      ? `${translator.t('queue.saved')} ${translator.t('queue.nextItem', { levelLabel: nextItem.levelLabel || `sr${nextItem.level}`, title: nextItem.title })}`
       : translator.t('queue.empty');
     els.queueMessage.textContent = state.queueMessage || defaultQueueMessage;
 
     const latest = history.latest();
     els.lastRequested.textContent = latest
-      ? translator.t('queue.lastRequested', { level: latest.level, title: latest.title })
+      ? translator.t('queue.lastRequested', { levelLabel: latest.levelLabel || `sr${latest.level}`, title: latest.title })
       : '';
     els.lastRequested.title = latest?.sourceName || latest?.title || '';
 
@@ -320,6 +334,12 @@ function createUi(options) {
     els.runQueue.disabled = state.downloadRunning || !state.downloadQueue.length || blocked;
     els.clearQueue.disabled = state.downloadRunning || !state.downloadQueue.length;
     els.batchSize.disabled = state.downloadRunning;
+    els.downloadFolder.disabled = state.downloadRunning;
+    els.downloadFolder.textContent = state.downloadDirectoryHandle
+      ? translator.t('button.changeFolder', { name: state.downloadDirectoryHandle.name })
+      : translator.t('button.chooseFolder');
+    els.browserDownloads.hidden = !state.downloadDirectoryHandle;
+    els.browserDownloads.disabled = state.downloadRunning;
     if (state.downloadRunning) els.runQueue.textContent = translator.t('button.processing');
     else if (blocked) els.runQueue.textContent = translator.t('button.resumeAfterLimit');
     else els.runQueue.textContent = translator.t('button.runQueue');
@@ -340,7 +360,7 @@ function createUi(options) {
     const rows = entries.map((entry) => `
       <tr>
         <td>${escapeHtml(formatLocalDate(entry.requestedAt, translator.locale(), translator.t('time.unknown')))}</td>
-        <td>sr${escapeHtml(entry.level)}</td>
+        <td>${escapeHtml(entry.levelLabel || `sr${entry.level}`)}</td>
         <td>${escapeHtml(translator.t(entry.type === 'sabun' ? 'history.sabun' : 'history.song'))}</td>
         <td><div class="sld-title">${escapeHtml(entry.title)}</div>${entry.sourceName ? `<div class="sld-muted">${escapeHtml(entry.sourceName)}</div>` : ''}</td>
         <td><span class="sld-id">${escapeHtml(entry.id)}</span></td>
@@ -367,9 +387,14 @@ function createUi(options) {
 
   function updateTranslations() {
     els.title.textContent = translator.t('app.title');
+    els.tableLabel.textContent = translator.t('app.table');
     els.levelLabel.textContent = translator.t('app.level');
-    els.loadLevel.textContent = translator.t('button.searchSpecificLevel', { level: els.level.value || state.selectedLevel });
-    els.selectMatched.textContent = translator.t('button.selectMatched');
+    els.loadLevel.textContent = translator.t('button.searchSpecificLevel', {
+      levelLabel: formatLevel(state.selectedTable, els.level.value || state.selectedLevel)
+    });
+    els.refreshLevel.textContent = translator.t('button.refreshSearch');
+    els.selectMatched.textContent = translator.t('button.selectVisible');
+    els.clearSelection.textContent = translator.t('button.clearSelection');
     els.queueSelected.textContent = translator.t('button.queueSelected');
     els.export.textContent = translator.t('button.exportCsv');
     els.stop.textContent = translator.t('button.stopSearch');
@@ -378,7 +403,7 @@ function createUi(options) {
     els.close.textContent = translator.t('button.close');
     els.language.value = translator.language;
 
-    const filterKeys = { all: 'filter.all', matched: 'filter.matched', review: 'filter.review', missing: 'filter.missing', requested: 'filter.requested' };
+    const filterKeys = { all: 'filter.all', pending: 'filter.pending', matched: 'filter.matched', review: 'filter.review', missing: 'filter.missing', requested: 'filter.requested' };
     panel.querySelectorAll('.sld-filter').forEach((button) => {
       button.textContent = translator.t(filterKeys[button.dataset.filter]);
     });
@@ -386,11 +411,13 @@ function createUi(options) {
     els.queueTitle.textContent = translator.t('queue.title');
     els.batchPrefix.textContent = translator.t('queue.batchPrefix');
     els.batchSuffix.textContent = translator.t('queue.batchSuffix');
+    els.batchSize.querySelector(`[value="${config.safeBatchValue}"]`).textContent = translator.t('queue.safeBatch');
+    els.browserDownloads.textContent = translator.t('button.useBrowserDownloads');
     els.clearQueue.textContent = translator.t('button.clearQueue');
 
     els.tableHeadings.select.textContent = translator.t('table.select');
     els.tableHeadings.index.textContent = translator.t('table.index');
-    els.chartHeading.textContent = `sr${state.selectedLevel} ${translator.t('table.chart')}`;
+    els.chartHeading.textContent = `${formatLevel(state.selectedTable, state.selectedLevel)} ${translator.t('table.chart')}`;
     els.tableHeadings.artist.textContent = translator.t('table.artist');
     els.tableHeadings.song.textContent = translator.t('table.songResults');
     els.tableHeadings.sabun.textContent = translator.t('table.sabunResults');
@@ -410,22 +437,41 @@ function createUi(options) {
     if (!els.historyOverlay.hidden) renderHistory();
   }
 
+  function setTables(tables) {
+    els.table.innerHTML = tables.map((table) => `<option value="${escapeHtml(table.id)}">${escapeHtml(table.name)} (${escapeHtml(table.symbol)})</option>`).join('');
+    els.table.value = state.selectedTableId;
+  }
+
   function setLevels(levels, counts) {
-    els.level.innerHTML = levels.map((level) => `<option value="${escapeHtml(level)}">sr${escapeHtml(level)} (${counts.get(level)})</option>`).join('');
+    els.level.innerHTML = levels.map((level) => `<option value="${escapeHtml(level)}">${escapeHtml(formatLevel(state.selectedTable, level))} (${counts.get(level)})</option>`).join('');
     els.level.value = state.selectedLevel;
     els.level.disabled = false;
     els.loadLevel.disabled = false;
-    els.loadLevel.textContent = translator.t('button.searchSpecificLevel', { level: state.selectedLevel });
+    els.refreshLevel.disabled = false;
+    els.loadLevel.textContent = translator.t('button.searchSpecificLevel', {
+      levelLabel: formatLevel(state.selectedTable, state.selectedLevel)
+    });
+  }
+
+  function setTableLoading(loading) {
+    els.table.disabled = loading || state.searchRunning;
+    els.level.disabled = loading || state.searchRunning || !state.levels.length;
+    els.loadLevel.disabled = loading || state.searchRunning || !state.levels.length;
+    els.refreshLevel.disabled = loading || state.searchRunning || !state.levels.length;
   }
 
   function setSearchRunning(running) {
     els.stop.disabled = !running;
     if (running) {
+      els.table.disabled = true;
       els.level.disabled = true;
       els.loadLevel.disabled = true;
+      els.refreshLevel.disabled = true;
     } else if (state.levels.length) {
+      els.table.disabled = false;
       els.level.disabled = false;
       els.loadLevel.disabled = false;
+      els.refreshLevel.disabled = false;
     }
   }
 
@@ -438,11 +484,15 @@ function createUi(options) {
     els.progress.value = Math.max(0, Number(value) || 0);
   }
 
-  function selectMatchedRows() {
+  function selectVisibleRows() {
     panel.querySelectorAll('tbody tr').forEach((tr) => {
       const checkbox = tr.querySelector('.sld-row-select');
-      if (checkbox) checkbox.checked = !checkbox.disabled && tr.dataset.status === 'matched';
+      if (checkbox) checkbox.checked = !tr.hidden && !checkbox.disabled;
     });
+  }
+
+  function clearSelectedRows() {
+    panel.querySelectorAll('.sld-row-select').forEach((checkbox) => { checkbox.checked = false; });
   }
 
   function selectedRowIndexes() {
@@ -469,15 +519,24 @@ function createUi(options) {
   });
 
   els.loadLevel.addEventListener('click', () => handlers.onSearchLevel?.(els.level.value));
+  els.refreshLevel.addEventListener('click', () => handlers.onRefreshLevel?.(els.level.value));
+  els.table.addEventListener('change', () => handlers.onTableChange?.(els.table.value));
   els.level.addEventListener('change', () => {
-    els.loadLevel.textContent = translator.t('button.searchSpecificLevel', { level: els.level.value });
+    state.selectedLevel = els.level.value;
+    els.loadLevel.textContent = translator.t('button.searchSpecificLevel', {
+      levelLabel: formatLevel(state.selectedTable, els.level.value)
+    });
+    handlers.onLevelChange?.(els.level.value);
   });
   els.stop.addEventListener('click', () => handlers.onStopSearch?.());
   els.close.addEventListener('click', () => handlers.onClose?.());
-  els.selectMatched.addEventListener('click', () => selectMatchedRows());
+  els.selectMatched.addEventListener('click', () => selectVisibleRows());
+  els.clearSelection.addEventListener('click', () => clearSelectedRows());
   els.queueSelected.addEventListener('click', () => handlers.onQueueSelected?.(selectedRowIndexes()));
   els.export.addEventListener('click', () => handlers.onExportSearch?.());
-  els.batchSize.addEventListener('change', () => handlers.onBatchSizeChange?.(Number(els.batchSize.value)));
+  els.batchSize.addEventListener('change', () => handlers.onBatchSizeChange?.(els.batchSize.value));
+  els.downloadFolder.addEventListener('click', () => handlers.onChooseDirectory?.());
+  els.browserDownloads.addEventListener('click', () => handlers.onUseBrowserDownloads?.());
   els.runQueue.addEventListener('click', () => handlers.onRunQueue?.());
   els.clearQueue.addEventListener('click', () => {
     if (!state.downloadQueue.length) return;
@@ -502,14 +561,16 @@ function createUi(options) {
   });
 
   updateTranslations();
-  setStatus(translator.t('status.loadingTable'));
+  setStatus(translator.t('status.loadingTable', { table: state.selectedTable?.name || '' }));
   setSearchRunning(false);
 
   return {
     panel,
     style,
     els,
+    setTables,
     setLevels,
+    setTableLoading,
     setStatus,
     setProgress,
     setSearchRunning,

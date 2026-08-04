@@ -3,5 +3,5 @@
 const { start } = require('./app');
 
 start().catch((error) => {
-  console.error('[Starlight Difficulty Downloader]', error);
+  console.error('[BMS Difficulty Table Downloader]', error);
 });

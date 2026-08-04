@@ -62,6 +62,10 @@ function createStorage(storageLike) {
       id: String(item.id),
       title: String(item.title || item.id),
       level: String(item.level ?? ''),
+      levelLabel: String(item.levelLabel || `sr${item.level ?? ''}`),
+      levelSymbol: String(item.levelSymbol || 'sr'),
+      tableId: String(item.tableId || 'starlight'),
+      tableName: String(item.tableName || 'Starlight'),
       sourceName: String(item.sourceName || ''),
       addedAt: item.addedAt || new Date().toISOString(),
       attempts: Number.isFinite(Number(item.attempts)) ? Number(item.attempts) : 0,
@@ -97,6 +101,65 @@ function createStorage(storageLike) {
     return Array.isArray(value) ? value : [];
   }
 
+  function searchResultKey(tableId, level) {
+    return `${String(tableId || 'starlight')}:${String(level ?? '')}`;
+  }
+
+  function normalizeSearchCache(value) {
+    if (!value || typeof value !== 'object' || !Array.isArray(value.entries)) return { entries: [] };
+    const entries = value.entries.filter((entry) => (
+      entry
+      && typeof entry === 'object'
+      && typeof entry.tableId === 'string'
+      && entry.level !== undefined
+      && Array.isArray(entry.rows)
+    )).map((entry) => ({
+      key: searchResultKey(entry.tableId, entry.level),
+      tableId: entry.tableId,
+      level: String(entry.level),
+      savedAt: entry.savedAt || new Date(0).toISOString(),
+      complete: Boolean(entry.complete),
+      rows: entry.rows
+    }));
+    return { entries };
+  }
+
+  function loadSearchResults() {
+    return normalizeSearchCache(readJson(CONFIG.storage.searchResults, { entries: [] }));
+  }
+
+  function loadSearchResult(tableId, level) {
+    const key = searchResultKey(tableId, level);
+    return loadSearchResults().entries.find((entry) => entry.key === key) || null;
+  }
+
+  function saveSearchResult(tableId, level, rows, complete = false) {
+    const key = searchResultKey(tableId, level);
+    const cache = loadSearchResults();
+    const next = {
+      key,
+      tableId: String(tableId || 'starlight'),
+      level: String(level ?? ''),
+      savedAt: new Date().toISOString(),
+      complete: Boolean(complete),
+      rows: Array.isArray(rows) ? rows : []
+    };
+    cache.entries = [next, ...cache.entries.filter((entry) => entry.key !== key)]
+      .slice(0, CONFIG.searchCacheLimit);
+    while (cache.entries.length) {
+      if (writeJson(CONFIG.storage.searchResults, cache)) return true;
+      cache.entries.pop();
+    }
+    return false;
+  }
+
+  function clearSearchResult(tableId, level) {
+    const key = searchResultKey(tableId, level);
+    const cache = loadSearchResults();
+    cache.entries = cache.entries.filter((entry) => entry.key !== key);
+    return writeJson(CONFIG.storage.searchResults, cache);
+  }
+
   return {
     readJson,
     writeJson,
@@ -118,7 +181,11 @@ function createStorage(storageLike) {
     },
     clearHistory() {
       return writeJson(CONFIG.storage.history, []);
-    }
+    },
+    loadSearchResults,
+    loadSearchResult,
+    saveSearchResult,
+    clearSearchResult
   };
 }
 

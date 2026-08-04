@@ -68,6 +68,7 @@ function classify(score) {
 }
 
 function getFallbacks(chart) {
+  if (chart?.tableId && chart.tableId !== 'starlight') return [];
   const title = normalize(stripDifficulty(chart.title));
   return DIRECT_FALLBACKS.filter((entry) => {
     const key = normalize(entry.title);
@@ -95,6 +96,13 @@ function selectionItemsForResult(result) {
   const topSong = result?.song?.matches?.[0];
   const topSabun = result?.sabun?.matches?.[0];
   const chart = result?.chart || {};
+  const metadata = {
+    level: String(chart.level ?? ''),
+    levelLabel: String(chart.levelSymbol || 'sr') + String(chart.level ?? ''),
+    levelSymbol: String(chart.levelSymbol || 'sr'),
+    tableId: String(chart.tableId || 'starlight'),
+    tableName: String(chart.tableName || 'Starlight')
+  };
 
   if (chart.url_diff && topSong?.item?.id && topSabun?.item?.id) {
     selections.push({
@@ -102,14 +110,14 @@ function selectionItemsForResult(result) {
       id: String(topSong.item.id),
       title: String(chart.title || itemDisplay(topSong.item)),
       sourceName: itemDisplay(topSong.item),
-      level: String(chart.level ?? '')
+      ...metadata
     });
     selections.push({
       type: 'sabun',
       id: String(topSabun.item.id),
       title: String(chart.title || itemDisplay(topSabun.item)),
       sourceName: itemDisplay(topSabun.item),
-      level: String(chart.level ?? '')
+      ...metadata
     });
     return selections;
   }
@@ -121,7 +129,7 @@ function selectionItemsForResult(result) {
       id: String(top.item.id),
       title: String(chart.title || itemDisplay(top.item)),
       sourceName: itemDisplay(top.item),
-      level: String(chart.level ?? '')
+      ...metadata
     });
   }
   return selections;

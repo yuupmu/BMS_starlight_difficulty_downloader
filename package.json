@@ -2,11 +2,12 @@
   "name": "starlight-difficulty-downloader",
   "version": "1.0.0",
   "private": true,
-  "description": "A multilingual bookmarklet for finding and sequentially requesting BMS files from Starlight difficulty levels.",
+  "description": "A multilingual bookmarklet for finding and sequentially requesting BMS files from multiple difficulty tables.",
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test tests/*.test.js",
     "check": "node scripts/check.mjs",
+    "sync:tables": "node scripts/sync-tables.mjs",
     "prepare": "npm run build"
   },
   "engines": {
