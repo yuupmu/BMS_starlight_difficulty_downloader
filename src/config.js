@@ -4,11 +4,10 @@ const VERSION = '1.0.0';
 
 const CONFIG = Object.freeze({
   version: VERSION,
-  projectName: 'Starlight Difficulty Downloader',
+  projectName: 'BMS Difficulty Table Downloader',
   requiredHost: 'horieyuuka.github.io',
   requiredPathPrefix: '/Songs',
   songsPageUrl: 'https://horieyuuka.github.io/Songs',
-  tableUrl: 'https://raw.githubusercontent.com/DJKuroakari/DJKuroakari.github.io/refs/heads/main/data.json',
   songsApi: 'https://horie.synology.me:8443/api/v1/folders/Songs/files',
   sabunsApi: 'https://horie.synology.me:8443/api/v1/sabuns',
   songGrantUrl: 'https://horie.synology.me:8443/api/v1/files/{id}/download-grants',
@@ -20,16 +19,19 @@ const CONFIG = Object.freeze({
   downloadDelayMs: 5000,
   defaultBatchSize: 3,
   allowedBatchSizes: Object.freeze([1, 3, 5, 10]),
+  safeBatchValue: 'safe',
   storage: Object.freeze({
     prefs: 'starlight-difficulty-downloader:prefs:v3',
     queue: 'starlight-difficulty-downloader:queue:v3',
     history: 'starlight-difficulty-downloader:history:v3',
+    searchResults: 'starlight-difficulty-downloader:search-results:v3',
     legacyPrefs: 'starlight-level-downloader:prefs:v2',
     legacyQueue: 'starlight-level-downloader:queue:v2'
   }),
   supportedLanguages: Object.freeze(['ko', 'ja', 'en']),
-  defaultLevel: '10',
+  defaultTableId: 'starlight',
   historyLimit: 5000,
+  searchCacheLimit: 8,
   searchResultLimit: 30,
   maxCandidatesPerSource: 3
 });

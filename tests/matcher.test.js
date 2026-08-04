@@ -9,7 +9,8 @@ const {
   classify,
   selectionItemsForResult,
   downloadCoverage,
-  findMatches
+  findMatches,
+  getFallbacks
 } = require('../src/matcher');
 
 test('matcher builds useful queries and gives exact titles a high score', () => {
@@ -37,6 +38,28 @@ test('a chart with a separate patch requires both song and sabun files', () => {
     partial: true,
     selections: items
   });
+});
+
+test('selected files keep their difficulty table metadata', () => {
+  const [item] = selectionItemsForResult({
+    chart: {
+      title: 'Example',
+      level: '10',
+      levelSymbol: 'sl',
+      tableId: 'satellite',
+      tableName: 'Satellite'
+    },
+    song: { matches: [{ item: { id: 'song-1', name: 'song.zip' }, score: 150 }] },
+    sabun: { matches: [] }
+  });
+  assert.equal(item.levelLabel, 'sl10');
+  assert.equal(item.tableId, 'satellite');
+  assert.equal(item.tableName, 'Satellite');
+});
+
+test('Starlight-only fallback links do not leak into other tables', () => {
+  assert.ok(getFallbacks({ title: 'opia', tableId: 'starlight' }).length > 0);
+  assert.equal(getFallbacks({ title: 'opia', tableId: 'satellite' }).length, 0);
 });
 
 test('a separate patch result is classified by its weakest required source', () => {

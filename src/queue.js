@@ -90,6 +90,10 @@ function createQueueManager(options) {
         title: String(rawItem.title || rawItem.id),
         sourceName: String(rawItem.sourceName || ''),
         level: String(rawItem.level ?? state.selectedLevel ?? ''),
+        levelLabel: String(rawItem.levelLabel || `${state.selectedTable?.symbol || 'sr'}${rawItem.level ?? state.selectedLevel ?? ''}`),
+        levelSymbol: String(rawItem.levelSymbol || state.selectedTable?.symbol || 'sr'),
+        tableId: String(rawItem.tableId || state.selectedTableId || 'starlight'),
+        tableName: String(rawItem.tableName || state.selectedTable?.name || 'Starlight'),
         addedAt: new Date().toISOString(),
         attempts: 0,
         lastAttemptAt: null,
@@ -123,12 +127,96 @@ function createQueueManager(options) {
 
   function triggerBrowserDownload(downloadUrl) {
     const absolute = new URL(downloadUrl, config.downloadBaseUrl).toString();
+    // Keep error/limit pages out of the current tab. A response without an
+    // attachment header is rendered inside this hidden frame instead.
+    const frame = document.createElement('iframe');
+    frame.name = `sld-download-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    frame.style.display = 'none';
+    document.body.appendChild(frame);
     const link = document.createElement('a');
     link.href = absolute;
+    link.target = frame.name;
     link.style.display = 'none';
     document.body.appendChild(link);
     link.click();
     link.remove();
+  }
+
+  function safeFileName(value, fallback) {
+    const cleaned = String(value || '')
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+      .replace(/[. ]+$/g, '')
+      .trim();
+    return cleaned || fallback;
+  }
+
+  function fileNameFromResponse(response, payload, item) {
+    const disposition = response.headers?.get?.('content-disposition') || '';
+    const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+    const basic = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+    let headerName = basic || '';
+    if (encoded) {
+      try { headerName = decodeURIComponent(encoded); } catch { headerName = encoded; }
+    }
+    let urlName = '';
+    try { urlName = decodeURIComponent(new URL(response.url || payload.downloadUrl, config.downloadBaseUrl).pathname.split('/').pop() || ''); } catch {}
+    return safeFileName(
+      headerName || payload.fileName || payload.filename || urlName,
+      `${item.type}-${item.id}.zip`
+    );
+  }
+
+  async function unusedFileHandle(directory, fileName) {
+    const dot = fileName.lastIndexOf('.');
+    const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
+    const extension = dot > 0 ? fileName.slice(dot) : '';
+    for (let suffix = 0; suffix < 10000; suffix += 1) {
+      const candidate = suffix ? `${stem} (${suffix})${extension}` : fileName;
+      try {
+        await directory.getFileHandle(candidate, { create: false });
+      } catch (error) {
+        if (error?.name === 'NotFoundError') return directory.getFileHandle(candidate, { create: true });
+        throw error;
+      }
+    }
+    throw new Error('Could not create a unique filename in the selected folder.');
+  }
+
+  async function saveToSelectedDirectory(directory, payload, item) {
+    const absolute = new URL(payload.downloadUrl, config.downloadBaseUrl).toString();
+    const fetchFn = options.fetchFn || globalThis.fetch?.bind(globalThis);
+    if (!fetchFn) throw new Error('This browser cannot save directly to a selected folder.');
+    const response = await fetchFn(absolute, { credentials: 'include' });
+    if (!response.ok) {
+      const error = new Error(`File download failed: ${response.status} ${response.statusText}`);
+      error.status = response.status;
+      throw error;
+    }
+    const contentType = response.headers?.get?.('content-type') || '';
+    if (/^(?:text\/html|application\/json)\b/i.test(contentType)) {
+      throw new Error(`The download server returned ${contentType} instead of an archive.`);
+    }
+    const fileHandle = await unusedFileHandle(directory, fileNameFromResponse(response, payload, item));
+    const writable = await fileHandle.createWritable();
+    try {
+      if (response.body?.pipeTo) {
+        await response.body.pipeTo(writable);
+      } else {
+        await writable.write(await response.blob());
+        await writable.close();
+      }
+    } catch (error) {
+      await writable.abort?.().catch?.(() => {});
+      throw error;
+    }
+  }
+
+  async function deliverDownload(payload, item) {
+    if (state.downloadDirectoryHandle) {
+      await saveToSelectedDirectory(state.downloadDirectoryHandle, payload, item);
+      return;
+    }
+    triggerBrowserDownload(payload.downloadUrl);
   }
 
   async function process(maxItems = state.batchSize) {
@@ -154,7 +242,10 @@ function createQueueManager(options) {
 
     let completed = 0;
     let skipped = initiallyPruned;
-    const requestedTarget = Math.max(1, Number(maxItems) || config.defaultBatchSize);
+    const safeMode = maxItems === config.safeBatchValue;
+    const requestedTarget = safeMode
+      ? state.downloadQueue.length
+      : Math.max(1, Number(maxItems) || config.defaultBatchSize);
     const knownWindowRemaining = Number(state.rateInfo?.remainingInWindow);
     const target = Number.isFinite(knownWindowRemaining) && knownWindowRemaining > 0
       ? Math.min(requestedTarget, knownWindowRemaining)
@@ -173,7 +264,7 @@ function createQueueManager(options) {
       state.queueMessage = translator.t('queue.processingItem', {
         current: completed + 1,
         target,
-        level: item.level,
+        levelLabel: item.levelLabel || `sr${item.level}`,
         title: item.title
       });
       item.attempts = Number(item.attempts || 0) + 1;
@@ -185,7 +276,7 @@ function createQueueManager(options) {
       try {
         const payload = await api.grant(item.type, item.id);
         applyRateInfo(payload, false);
-        triggerBrowserDownload(payload.downloadUrl);
+        await deliverDownload(payload, item);
 
         // Record first, then remove from the queue. If execution is interrupted between
         // these two writes, the next run prunes the remaining queue item by history key.

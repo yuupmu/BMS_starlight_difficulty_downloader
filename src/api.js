@@ -44,12 +44,13 @@ function createApi(options = {}) {
     return payload;
   }
 
-  async function fetchTable() {
-    const response = await fetchFn(config.tableUrl, { cache: 'no-store' });
+  async function fetchTable(table) {
+    if (!table?.dataUrl) throw new ApiError('Difficulty table URL is missing.', 500, {});
+    const response = await fetchFn(table.dataUrl, { cache: 'no-store', credentials: 'omit' });
     if (!response.ok) throw new ApiError(`Difficulty table request failed: ${response.status}`, response.status, {});
-    const table = await response.json();
-    if (!Array.isArray(table)) throw new ApiError('Unexpected difficulty table format.', 500, {});
-    return table;
+    const rows = await response.json();
+    if (!Array.isArray(rows)) throw new ApiError('Unexpected difficulty table format.', 500, {});
+    return rows;
   }
 
   async function search(sourceType, query) {

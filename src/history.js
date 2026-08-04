@@ -13,6 +13,10 @@ function normalizeEntry(entry) {
     title: String(entry.title || entry.id),
     sourceName: String(entry.sourceName || ''),
     level: String(entry.level ?? ''),
+    levelLabel: String(entry.levelLabel || `sr${entry.level ?? ''}`),
+    levelSymbol: String(entry.levelSymbol || 'sr'),
+    tableId: String(entry.tableId || 'starlight'),
+    tableName: String(entry.tableName || 'Starlight'),
     requestedAt,
     fileName: String(entry.fileName || ''),
     status: 'requested'

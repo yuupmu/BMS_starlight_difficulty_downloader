@@ -1,5 +1,5 @@
 /*!
- * Starlight Difficulty Downloader
+ * BMS Difficulty Table Downloader
  * Built from the files in /src. Do not edit this generated file directly.
  */
 (function () {
@@ -53,12 +53,13 @@
         return payload;
       }
 
-      async function fetchTable() {
-        const response = await fetchFn(config.tableUrl, { cache: 'no-store' });
+      async function fetchTable(table) {
+        if (!table?.dataUrl) throw new ApiError('Difficulty table URL is missing.', 500, {});
+        const response = await fetchFn(table.dataUrl, { cache: 'no-store', credentials: 'omit' });
         if (!response.ok) throw new ApiError(`Difficulty table request failed: ${response.status}`, response.status, {});
-        const table = await response.json();
-        if (!Array.isArray(table)) throw new ApiError('Unexpected difficulty table format.', 500, {});
-        return table;
+        const rows = await response.json();
+        if (!Array.isArray(rows)) throw new ApiError('Unexpected difficulty table format.', 500, {});
+        return rows;
       }
 
       async function search(sourceType, query) {
@@ -119,6 +120,13 @@
     const { createQueueManager } = require('./queue');
     const { createUi } = require('./ui');
     const {
+      TABLE_CATALOG,
+      getTable,
+      normalizeTableRows,
+      sortLevels,
+      formatLevel
+    } = require('./tables');
+    const {
       classify,
       getFallbacks,
       findMatches,
@@ -128,7 +136,6 @@
       downloadCoverage
     } = require('./matcher');
     const {
-      levelSort,
       createCsv,
       downloadTextFile
     } = require('./utils');
@@ -155,24 +162,40 @@
         limit: CONFIG.historyLimit
       });
 
-      const batchSize = CONFIG.allowedBatchSizes.includes(Number(savedPrefs.batchSize))
-        ? Number(savedPrefs.batchSize)
-        : CONFIG.defaultBatchSize;
+      const batchSize = savedPrefs.batchSize === CONFIG.safeBatchValue
+        ? CONFIG.safeBatchValue
+        : CONFIG.allowedBatchSizes.includes(Number(savedPrefs.batchSize))
+          ? Number(savedPrefs.batchSize)
+          : CONFIG.defaultBatchSize;
+
+      const selectedTable = getTable(savedPrefs.selectedTableId || CONFIG.defaultTableId);
+      const savedSelectedLevels = savedPrefs.selectedLevels && typeof savedPrefs.selectedLevels === 'object'
+        ? savedPrefs.selectedLevels
+        : {};
+      const initialLevel = savedSelectedLevels[selectedTable.id]
+        ?? (selectedTable.id === 'starlight' ? savedPrefs.selectedLevel : null)
+        ?? selectedTable.defaultLevel;
 
       const state = {
+        tables: TABLE_CATALOG,
         table: [],
         levels: [],
         levelCounts: new Map(),
         charts: [],
         rows: [],
-        selectedLevel: String(savedPrefs.selectedLevel ?? CONFIG.defaultLevel),
+        selectedTableId: selectedTable.id,
+        selectedTable,
+        selectedLevels: { ...savedSelectedLevels, [selectedTable.id]: String(initialLevel) },
+        selectedLevel: String(initialLevel),
         selectedFilter: 'all',
         searchStopped: false,
         searchRunning: false,
         searchRunId: 0,
-        statusDescriptor: { key: 'status.loadingTable', variables: {} },
+        tableLoadRunId: 0,
+        statusDescriptor: { key: 'status.loadingTable', variables: { table: selectedTable.name } },
         downloadQueue: storage.loadQueue(),
         downloadRunning: false,
+        downloadDirectoryHandle: null,
         batchSize,
         blockedUntil: Number(savedPrefs.blockedUntil) || 0,
         rateInfo: savedPrefs.rateInfo && typeof savedPrefs.rateInfo === 'object' ? savedPrefs.rateInfo : null,
@@ -190,6 +213,8 @@
       function savePrefs() {
         storage.savePrefs({
           selectedLevel: state.selectedLevel,
+          selectedTableId: state.selectedTableId,
+          selectedLevels: state.selectedLevels,
           batchSize: state.batchSize,
           blockedUntil: state.blockedUntil,
           rateInfo: state.rateInfo,
@@ -203,7 +228,7 @@
       }
 
       function refreshStatus() {
-        const descriptor = state.statusDescriptor || { key: 'status.loadingTable', variables: {} };
+        const descriptor = state.statusDescriptor || { key: 'status.loadingTable', variables: { table: state.selectedTable.name } };
         ui?.setStatus(translator.t(descriptor.key, descriptor.variables));
       }
 
@@ -235,7 +260,136 @@
         state.queueMessage = translator.t('queue.pruned', { count: initiallyPruned });
       }
 
-      async function startLevelSearch(level) {
+      async function loadTable(tableId, options = {}) {
+        const descriptor = getTable(tableId);
+        const loadRunId = state.tableLoadRunId + 1;
+        state.tableLoadRunId = loadRunId;
+        state.searchStopped = true;
+        state.searchRunning = false;
+        state.searchRunId += 1;
+        state.selectedTableId = descriptor.id;
+        state.selectedTable = descriptor;
+        state.selectedLevel = String(state.selectedLevels[descriptor.id] ?? descriptor.defaultLevel);
+        state.table = [];
+        state.levels = [];
+        state.levelCounts = new Map();
+        state.charts = [];
+        state.rows = [];
+        state.selectedFilter = 'all';
+        savePrefs();
+
+        if (ui) {
+          ui.els.table.value = descriptor.id;
+          ui.els.level.innerHTML = '<option></option>';
+          ui.els.body.innerHTML = '';
+          ui.setProgress(0, 1);
+          ui.setSearchRunning(false);
+          ui.setTableLoading(true);
+          ui.updateTranslations();
+        }
+        setStatus('status.loadingTable', { table: descriptor.name });
+
+        try {
+          const rawRows = await api.fetchTable(descriptor);
+          if (state.destroyed || loadRunId !== state.tableLoadRunId) return false;
+          const table = normalizeTableRows(rawRows, descriptor);
+          if (!table.length) throw new Error('No usable charts found in the official table.');
+          state.table = table;
+
+          const counts = new Map();
+          for (const entry of table) counts.set(entry.level, (counts.get(entry.level) || 0) + 1);
+          state.levelCounts = counts;
+          state.levels = sortLevels(counts.keys(), descriptor);
+          if (!state.levels.includes(state.selectedLevel)) {
+            state.selectedLevel = state.levels.includes(descriptor.defaultLevel)
+              ? descriptor.defaultLevel
+              : state.levels[0];
+          }
+          state.selectedLevels[descriptor.id] = state.selectedLevel;
+
+          ui.setLevels(state.levels, counts);
+          ui.setTableLoading(false);
+          savePrefs();
+
+          const restored = state.downloadQueue.length || history.size()
+            ? translator.t('status.tableRestoredSuffix', {
+              queue: state.downloadQueue.length,
+              history: history.size()
+            })
+            : '';
+          setStatus('status.tableLoaded', { table: descriptor.name, count: table.length, restored });
+          ui.renderQueue();
+          return true;
+        } catch (error) {
+          if (state.destroyed || loadRunId !== state.tableLoadRunId) return false;
+          console.error(error);
+          ui.setTableLoading(false);
+          setStatus('status.failure', { table: descriptor.name, error: error?.message || String(error) });
+          if (options.initial) {
+            alert(`${translator.t('app.loadFailureTitle')}\n\n${error?.message || error}\n\n${translator.t('app.verifySongsPage')}`);
+          }
+          return false;
+        }
+      }
+
+      function chartIdentity(chart) {
+        return String(chart?.sha256 || chart?.url_diff || chart?.url || `${chart?.title || ''}|${chart?.artist || ''}`);
+      }
+
+      function cacheableRows(rows) {
+        const compactSource = (source) => ({
+          error: String(source?.error || ''),
+          matches: (source?.matches || []).map((match) => ({
+            score: Number(match.score) || 0,
+            query: String(match.query || ''),
+            item: {
+              id: String(match.item?.id || ''),
+              title: String(match.item?.title || ''),
+              subtitle: String(match.item?.subtitle || ''),
+              name: String(match.item?.name || ''),
+              path: String(match.item?.path || ''),
+              artist: String(match.item?.artist || '')
+            }
+          }))
+        });
+        return rows.map((row) => ({
+          chart: {
+            title: String(row.chart?.title || ''),
+            subtitle: String(row.chart?.subtitle || ''),
+            artist: String(row.chart?.artist || ''),
+            level: String(row.chart?.level || ''),
+            url: String(row.chart?.url || ''),
+            url_diff: String(row.chart?.url_diff || ''),
+            md5: String(row.chart?.md5 || ''),
+            sha256: String(row.chart?.sha256 || ''),
+            tableId: String(row.chart?.tableId || ''),
+            tableName: String(row.chart?.tableName || ''),
+            levelSymbol: String(row.chart?.levelSymbol || ''),
+            tableSourceUrl: String(row.chart?.tableSourceUrl || '')
+          },
+          song: compactSource(row.song),
+          sabun: compactSource(row.sabun),
+          fallbacks: (row.fallbacks || []).map((fallback) => ({ ...fallback })),
+          classification: { ...row.classification }
+        }));
+      }
+
+      function saveSearchCache(level, complete) {
+        return storage.saveSearchResult(
+          state.selectedTableId,
+          level,
+          cacheableRows(state.rows),
+          complete
+        );
+      }
+
+      function compatibleCachedRows(cached, charts) {
+        return Boolean(cached?.rows?.length <= charts.length && cached.rows.every((row, index) => (
+          row?.chart && chartIdentity(row.chart) === chartIdentity(charts[index])
+        )));
+      }
+
+      async function startLevelSearch(level, options = {}) {
         const normalizedLevel = String(level).trim();
         if (!state.table.length || !normalizedLevel) return;
 
@@ -244,13 +398,16 @@
         state.searchStopped = false;
         state.searchRunning = true;
         state.selectedLevel = normalizedLevel;
+        state.selectedLevels[state.selectedTableId] = normalizedLevel;
         state.selectedFilter = 'all';
         state.charts = state.table.filter((entry) => String(entry.level).trim() === normalizedLevel);
         state.rows = [];
+        if (options.force) storage.clearSearchResult(state.selectedTableId, normalizedLevel);
         savePrefs();
 
         ui.els.level.value = normalizedLevel;
-        ui.els.chartHeading.textContent = `sr${normalizedLevel} ${translator.t('table.chart')}`;
+        const levelLabel = formatLevel(state.selectedTable, normalizedLevel);
+        ui.els.chartHeading.textContent = `${levelLabel} ${translator.t('table.chart')}`;
         ui.els.body.innerHTML = '';
         ui.setProgress(0, state.charts.length);
         ui.setSearchRunning(true);
@@ -260,20 +417,42 @@
         if (!state.charts.length) {
           state.searchRunning = false;
           ui.setSearchRunning(false);
-          setStatus('status.noLevel', { level: normalizedLevel });
+          setStatus('status.noLevel', { levelLabel });
           return;
         }
 
-        setStatus('status.levelConfirmed', { level: normalizedLevel, count: state.charts.length });
+        const cached = options.force ? null : storage.loadSearchResult(state.selectedTableId, normalizedLevel);
+        if (cached && compatibleCachedRows(cached, state.charts)) {
+          state.rows = cached.rows;
+          ui.renderAllRows({ preserveSelection: false });
+          ui.setProgress(state.rows.length, state.charts.length);
+          if (cached.complete && state.rows.length === state.charts.length) {
+            state.searchRunning = false;
+            ui.setSearchRunning(false);
+            setStatus('status.searchCacheRestored', {
+              levelLabel,
+              count: state.rows.length,
+              time: new Date(cached.savedAt).toLocaleString(translator.locale())
+            });
+            return;
+          }
+          setStatus('status.searchCacheResumed', {
+            levelLabel,
+            current: state.rows.length,
+            total: state.charts.length
+          });
+        }
+
+        if (!state.rows.length) setStatus('status.levelConfirmed', { levelLabel, count: state.charts.length });
 
         const isCancelled = () => state.searchStopped || runId !== state.searchRunId || state.destroyed;
 
-        for (let index = 0; index < state.charts.length; index += 1) {
+        for (let index = state.rows.length; index < state.charts.length; index += 1) {
           if (isCancelled()) break;
           const chart = state.charts[index];
           ui.setProgress(index, state.charts.length);
           setStatus('status.searching', {
-            level: normalizedLevel,
+            levelLabel,
             current: index + 1,
             total: state.charts.length,
             title: chart.title
@@ -317,6 +496,9 @@
           }
 
           state.rows.push({ chart, song, sabun, fallbacks, classification });
+          if (state.rows.length % 5 === 0) {
+            saveSearchCache(normalizedLevel, false);
+          }
           ui.renderRow(state.rows.length - 1);
           ui.renderCounts();
           ui.setProgress(index + 1, state.charts.length);
@@ -325,14 +507,15 @@
         if (runId !== state.searchRunId || state.destroyed) return;
         state.searchRunning = false;
         ui.setSearchRunning(false);
+        saveSearchCache(normalizedLevel, !state.searchStopped && state.rows.length === state.charts.length);
         if (state.searchStopped) {
           setStatus('status.searchStopped', {
-            level: normalizedLevel,
+            levelLabel,
             count: state.rows.length
           });
         } else {
           setStatus('status.searchComplete', {
-            level: normalizedLevel,
+            levelLabel,
             count: state.charts.length
           });
         }
@@ -342,9 +525,10 @@
         state.searchStopped = true;
         state.searchRunId += 1;
         state.searchRunning = false;
+        saveSearchCache(state.selectedLevel, false);
         ui.setSearchRunning(false);
         setStatus('status.searchStopped', {
-          level: state.selectedLevel,
+          levelLabel: formatLevel(state.selectedTable, state.selectedLevel),
           count: state.rows.length
         });
       }
@@ -371,14 +555,18 @@
           id,
           title: result.chart.title,
           sourceName: itemDisplay(match.item),
-          level: result.chart.level
+          level: result.chart.level,
+          levelLabel: formatLevel(state.selectedTable, result.chart.level),
+          tableId: result.chart.tableId,
+          tableName: result.chart.tableName,
+          levelSymbol: result.chart.levelSymbol
         }]);
         if (enqueueResult.added > 0) await queueManager.process(1);
       }
 
       function exportSearchResults() {
         const headers = [
-          'index', 'level', 'title', 'subtitle', 'artist', 'sha256', 'match_status', 'download_status',
+          'index', 'table_id', 'table_name', 'level', 'level_label', 'title', 'subtitle', 'artist', 'sha256', 'match_status', 'download_status',
           'song_match', 'song_file_id', 'song_score', 'sabun_match', 'sabun_file_id', 'sabun_score',
           'fallbacks', 'table_url', 'table_diff_url'
         ];
@@ -396,7 +584,10 @@
 
           rows.push([
             index + 1,
+            result.chart.tableId,
+            result.chart.tableName,
             result.chart.level,
+            formatLevel(state.selectedTable, result.chart.level),
             result.chart.title,
             result.chart.subtitle || '',
             result.chart.artist || '',
@@ -416,21 +607,25 @@
         });
 
         const date = new Date().toISOString().slice(0, 10);
+        const safeLevel = formatLevel(state.selectedTable, state.selectedLevel).replace(/[^\p{L}\p{N}_+-]+/gu, '-');
         downloadTextFile(
           createCsv(rows),
-          `starlight_sr${state.selectedLevel}_live_results_${date}.csv`,
+          `${state.selectedTableId}_${safeLevel}_live_results_${date}.csv`,
           'text/csv;charset=utf-8'
         );
       }
 
       function exportHistory() {
         const rows = [[
-          'requested_at', 'level', 'type', 'title', 'source_name', 'file_id', 'file_name', 'status'
+          'requested_at', 'table_id', 'table_name', 'level', 'level_label', 'type', 'title', 'source_name', 'file_id', 'file_name', 'status'
         ]];
         for (const entry of history.list()) {
           rows.push([
             entry.requestedAt,
+            entry.tableId,
+            entry.tableName,
             entry.level,
+            entry.levelLabel,
             entry.type,
             entry.title,
             entry.sourceName,
@@ -452,6 +647,28 @@
         refreshStatus();
       }
 
+      async function chooseDownloadDirectory() {
+        if (typeof globalThis.showDirectoryPicker !== 'function') {
+          state.queueMessage = translator.t('download.folderUnsupported');
+          ui.renderQueue();
+          return;
+        }
+        try {
+          const handle = await globalThis.showDirectoryPicker({
+            id: 'bms-difficulty-table-downloader',
+            mode: 'readwrite'
+          });
+          state.downloadDirectoryHandle = handle;
+          state.queueMessage = translator.t('download.folderSelected', { name: handle.name });
+          ui.renderQueue();
+        } catch (error) {
+          if (error?.name !== 'AbortError') {
+            state.queueMessage = translator.t('download.folderFailure', { error: error?.message || String(error) });
+            ui.renderQueue();
+          }
+        }
+      }
+
       function destroy() {
         if (state.destroyed) return;
         state.destroyed = true;
@@ -469,7 +686,16 @@
         translator,
         history,
         handlers: {
+          onTableChange: loadTable,
+          onLevelChange(level) {
+            state.selectedLevel = String(level);
+            state.selectedLevels[state.selectedTableId] = state.selectedLevel;
+            savePrefs();
+          },
           onSearchLevel: startLevelSearch,
+          onRefreshLevel(level) {
+            startLevelSearch(level, { force: true });
+          },
           onStopSearch: stopSearch,
           onClose: destroy,
           onCandidate: handleCandidate,
@@ -484,8 +710,18 @@
           },
           onExportSearch: exportSearchResults,
           onBatchSizeChange(value) {
-            state.batchSize = CONFIG.allowedBatchSizes.includes(value) ? value : CONFIG.defaultBatchSize;
+            state.batchSize = value === CONFIG.safeBatchValue
+              ? CONFIG.safeBatchValue
+              : CONFIG.allowedBatchSizes.includes(Number(value))
+                ? Number(value)
+                : CONFIG.defaultBatchSize;
             savePrefs();
+          },
+          onChooseDirectory: chooseDownloadDirectory,
+          onUseBrowserDownloads() {
+            state.downloadDirectoryHandle = null;
+            state.queueMessage = translator.t('download.browserSelected');
+            ui.renderQueue();
           },
           onRunQueue() {
             queueManager.process(state.batchSize);
@@ -512,6 +748,8 @@
         }
       });
 
+      ui.setTables(TABLE_CATALOG);
+
       globalThis.__STARLIGHT_DIFFICULTY_DOWNLOADER__ = { destroy, state };
 
       state.rateTimer = setInterval(() => {
@@ -520,44 +758,7 @@
         ui.renderQueue();
       }, 1000);
 
-      try {
-        const table = await api.fetchTable();
-        if (state.destroyed) return null;
-        state.table = table;
-
-        const counts = new Map();
-        for (const entry of table) {
-          const level = String(entry.level ?? '').trim();
-          if (!level) continue;
-          counts.set(level, (counts.get(level) || 0) + 1);
-        }
-        state.levelCounts = counts;
-        state.levels = [...counts.keys()].sort(levelSort);
-        if (!state.levels.length) throw new Error('No levels found in the official table.');
-        if (!state.levels.includes(state.selectedLevel)) {
-          state.selectedLevel = state.levels.includes(CONFIG.defaultLevel)
-            ? CONFIG.defaultLevel
-            : state.levels[0];
-        }
-
-        ui.setLevels(state.levels, counts);
-        savePrefs();
-
-        const restored = state.downloadQueue.length || history.size()
-          ? translator.t('status.tableRestoredSuffix', {
-            queue: state.downloadQueue.length,
-            history: history.size()
-          })
-          : '';
-        setStatus('status.tableLoaded', { level: state.selectedLevel, restored });
-        ui.renderQueue();
-        await startLevelSearch(state.selectedLevel);
-      } catch (error) {
-        console.error(error);
-        setStatus('status.failure', { error: error?.message || String(error) });
-        ui.els.loadLevel.disabled = true;
-        alert(`${translator.t('app.loadFailureTitle')}\n\n${error?.message || error}\n\n${translator.t('app.verifySongsPage')}`);
-      }
+      await loadTable(state.selectedTableId, { initial: true });
 
       return globalThis.__STARLIGHT_DIFFICULTY_DOWNLOADER__;
     }
@@ -571,11 +772,10 @@
 
     const CONFIG = Object.freeze({
       version: VERSION,
-      projectName: 'Starlight Difficulty Downloader',
+      projectName: 'BMS Difficulty Table Downloader',
       requiredHost: 'horieyuuka.github.io',
       requiredPathPrefix: '/Songs',
       songsPageUrl: 'https://horieyuuka.github.io/Songs',
-      tableUrl: 'https://raw.githubusercontent.com/DJKuroakari/DJKuroakari.github.io/refs/heads/main/data.json',
       songsApi: 'https://horie.synology.me:8443/api/v1/folders/Songs/files',
       sabunsApi: 'https://horie.synology.me:8443/api/v1/sabuns',
       songGrantUrl: 'https://horie.synology.me:8443/api/v1/files/{id}/download-grants',
@@ -587,16 +787,19 @@
       downloadDelayMs: 5000,
       defaultBatchSize: 3,
       allowedBatchSizes: Object.freeze([1, 3, 5, 10]),
+      safeBatchValue: 'safe',
       storage: Object.freeze({
         prefs: 'starlight-difficulty-downloader:prefs:v3',
         queue: 'starlight-difficulty-downloader:queue:v3',
         history: 'starlight-difficulty-downloader:history:v3',
+        searchResults: 'starlight-difficulty-downloader:search-results:v3',
         legacyPrefs: 'starlight-level-downloader:prefs:v2',
         legacyQueue: 'starlight-level-downloader:queue:v2'
       }),
       supportedLanguages: Object.freeze(['ko', 'ja', 'en']),
-      defaultLevel: '10',
+      defaultTableId: 'starlight',
       historyLimit: 5000,
+      searchCacheLimit: 8,
       searchResultLimit: 30,
       maxCandidatesPerSource: 3
     });
@@ -638,6 +841,10 @@
         title: String(entry.title || entry.id),
         sourceName: String(entry.sourceName || ''),
         level: String(entry.level ?? ''),
+        levelLabel: String(entry.levelLabel || `sr${entry.level ?? ''}`),
+        levelSymbol: String(entry.levelSymbol || 'sr'),
+        tableId: String(entry.tableId || 'starlight'),
+        tableName: String(entry.tableName || 'Starlight'),
         requestedAt,
         fileName: String(entry.fileName || ''),
         status: 'requested'
@@ -742,18 +949,25 @@
 
     const DICTIONARIES = Object.freeze({
       ko: Object.freeze({
-        'app.title': 'Starlight 난이도 다운로더',
+        'app.title': 'BMS 난이도표 다운로더',
         'app.language': '언어',
+        'app.table': '난이도표',
         'app.level': '레벨',
         'app.loading': '불러오는 중…',
         'app.requiredPage': '이 도구는 BMS Library의 Songs 페이지에서 실행해야 합니다.',
         'app.openRequiredPage': 'Songs 페이지를 연 뒤 북마크를 다시 실행해 주세요.',
-        'app.loadFailureTitle': 'Starlight 난이도 다운로더 실행 실패',
+        'app.loadFailureTitle': 'BMS 난이도표 다운로더 실행 실패',
         'app.verifySongsPage': 'BMS Library Songs 페이지가 정상적으로 열리는지 확인해 주세요.',
 
         'button.searchLevel': '이 레벨 검색',
-        'button.searchSpecificLevel': 'sr{level} 검색',
+        'button.searchSpecificLevel': '{levelLabel} 검색',
         'button.selectMatched': '높은 확률 선택',
+        'button.selectVisible': '현재 화면 전체 선택',
+        'button.clearSelection': '선택 해제',
+        'button.refreshSearch': '새로 검색',
+        'button.chooseFolder': '저장 폴더 선택',
+        'button.changeFolder': '저장 폴더: {name}',
+        'button.useBrowserDownloads': '브라우저 다운로드 사용',
         'button.queueSelected': '선택 → 대기열',
         'button.exportCsv': '검색 결과 CSV',
         'button.stopSearch': '검색 중지',
@@ -769,6 +983,7 @@
         'button.removeRecord': '기록 삭제',
 
         'filter.all': '전체',
+        'filter.pending': '미다운로드',
         'filter.matched': '높은 확률',
         'filter.review': '검토',
         'filter.missing': '미매칭',
@@ -777,11 +992,12 @@
         'queue.title': '다운로드 대기열',
         'queue.batchPrefix': '한 번에',
         'queue.batchSuffix': '개',
+        'queue.safeBatch': '서버 허용량까지 (자동)',
         'queue.pendingCount': '{count}개 대기',
         'queue.historyCount': '요청 이력 {count}개',
         'queue.empty': '대기열이 비어 있습니다.',
         'queue.saved': '대기열과 진행 상황은 페이지를 닫아도 저장됩니다.',
-        'queue.nextItem': '다음 파일: sr{level} {title}',
+        'queue.nextItem': '다음 파일: {levelLabel} {title}',
         'queue.added': '{added}개를 대기열에 추가했습니다.',
         'queue.addedWithSkips': '{added}개 추가 · 이미 요청 완료 {requested}개 · 대기열 중복 {queued}개 건너뜀',
         'queue.nothingAdded': '새로 추가할 파일이 없습니다. 이미 대기열에 있거나 요청 완료된 파일입니다.',
@@ -790,7 +1006,7 @@
         'queue.restored': '이전 대기열 {pending}개와 요청 이력 {history}개를 복원했습니다.',
         'queue.pruned': '요청 완료 이력과 겹친 대기열 {count}개를 자동으로 건너뛰었습니다.',
         'queue.downloadStarting': '다운로드 요청을 시작합니다. 브라우저가 여러 파일 허용 여부를 물으면 허용해 주세요.',
-        'queue.processingItem': '이번 배치 {current}/{target}: sr{level} {title}',
+        'queue.processingItem': '이번 배치 {current}/{target}: {levelLabel} {title}',
         'queue.batchComplete': '이번 배치 {completed}개 요청 완료 · {remaining}개 남음. 다음 배치는 재개 버튼을 누르세요.',
         'queue.allComplete': '대기열 {completed}개를 모두 브라우저로 전달했습니다.',
         'queue.skippedCompleted': '이미 요청 완료된 {count}개를 건너뛰고 다음 파일부터 이어갑니다.',
@@ -800,23 +1016,25 @@
         'queue.limitTodaySuffix': ' 오늘 잔여 {count}개',
         'queue.windowUsed': '이번 창의 허용량을 모두 사용했습니다. {time} 이후 재개하세요.',
         'queue.limitExpired': '제한 시간이 끝났습니다. 재개 버튼을 눌러 주세요.',
-        'queue.lastRequested': '마지막 요청: sr{level} {title}',
+        'queue.lastRequested': '마지막 요청: {levelLabel} {title}',
 
         'rate.unknown': '서버 제한: 첫 다운로드 때 확인',
         'rate.blocked': '단기 제한 중 · {time} 초기화 · {remaining} 남음',
         'rate.remaining': '서버 잔여량 · 이번 창 {window} · 오늘 {today}',
         'rate.nextReset': '서버가 안내한 다음 초기화 시각',
 
-        'status.loadingTable': '공식 난이도표를 읽는 중…',
-        'status.tableLoaded': '공식표를 불러왔습니다. sr{level} 검색을 시작합니다.{restored}',
+        'status.loadingTable': '{table} 난이도표를 읽는 중…',
+        'status.tableLoaded': '{table} 표 {count}개를 불러왔습니다. 레벨을 선택하고 검색 버튼을 눌러 주세요.{restored}',
         'status.tableRestoredSuffix': ' 저장된 대기열 {queue}개와 이력 {history}개를 복원했습니다.',
-        'status.noLevel': '공식표에서 sr{level} 항목을 찾지 못했습니다.',
-        'status.levelConfirmed': '공식 sr{level} {count}개를 확인했습니다. 라이브 미러를 대조합니다.',
-        'status.searching': 'sr{level} 검색 {current}/{total}: {title}',
-        'status.searchStopped': 'sr{level} 검색을 중지했습니다. 현재까지 {count}개 결과는 사용할 수 있습니다.',
-        'status.searchComplete': '완료: 공식 sr{level} {count}개 대조 결과입니다. 파일 이름을 확인한 뒤 대기열에 추가하세요.',
-        'status.failure': '실패: {error}',
-        'status.counts': 'sr{level} 전체 {total} · 높은 확률 {matched} · 검토 {review} · 미매칭 {missing} · 요청 완료 {requested}',
+        'status.noLevel': '공식표에서 {levelLabel} 항목을 찾지 못했습니다.',
+        'status.levelConfirmed': '공식 {levelLabel} {count}개를 확인했습니다. 라이브 미러를 대조합니다.',
+        'status.searching': '{levelLabel} 검색 {current}/{total}: {title}',
+        'status.searchStopped': '{levelLabel} 검색을 중지했습니다. 현재까지 {count}개 결과는 사용할 수 있습니다.',
+        'status.searchComplete': '완료: 공식 {levelLabel} {count}개 대조 결과입니다. 파일 이름을 확인한 뒤 대기열에 추가하세요.',
+        'status.searchCacheRestored': '저장된 {levelLabel} 검색 결과 {count}개를 다시 불러왔습니다. (저장 시각: {time}) 새 API 검색 없이 바로 사용할 수 있습니다.',
+        'status.searchCacheResumed': '저장된 {levelLabel} 결과 {current}/{total}개를 복원하고 나머지만 이어서 검색합니다.',
+        'status.failure': '{table} 표 불러오기 실패: {error}',
+        'status.counts': '{levelLabel} 전체 {total} · 높은 확률 {matched} · 검토 {review} · 미매칭 {missing} · 요청 완료 {requested}',
 
         'classification.matched': '높은 확률',
         'classification.review': '검토 권장',
@@ -829,6 +1047,10 @@
         'download.allRequested': '필요 파일 모두 요청 완료',
         'download.candidateRequested': '브라우저 전달 완료',
         'download.definition': '“요청 완료”는 서버가 다운로드 주소를 발급하고 파일을 브라우저에 전달한 상태입니다. 브라우저나 디스크에서 실제 저장이 끝났는지는 웹페이지가 확인할 수 없습니다.',
+        'download.folderSelected': '이 실행에서는 “{name}” 폴더에 직접 저장합니다. 같은 이름의 파일은 덮어쓰지 않습니다.',
+        'download.folderUnsupported': '이 브라우저는 폴더 직접 저장을 지원하지 않습니다. Chrome/Edge를 사용하거나 브라우저 다운로드 위치 설정을 이용해 주세요.',
+        'download.folderFailure': '저장 폴더를 사용할 수 없습니다: {error}',
+        'download.browserSelected': '브라우저 기본 다운로드 방식으로 전환했습니다.',
 
         'table.select': '선택',
         'table.index': '#',
@@ -862,7 +1084,7 @@
         'history.cleared': '다운로드 이력을 모두 삭제했습니다.',
         'history.recordRemoved': '요청 완료 기록을 삭제했습니다.',
         'history.retryQueued': '기록을 해제하고 파일을 대기열에 추가했습니다.',
-        'history.exportName': 'starlight_download_history_{date}.csv',
+        'history.exportName': 'bms_table_download_history_{date}.csv',
 
         'confirm.clearQueue': '대기열 {count}개를 모두 비울까요?',
         'confirm.clearHistory': '요청 완료 이력 {count}개를 모두 삭제할까요? 이후 같은 파일이 중복 다운로드될 수 있습니다.',
@@ -901,18 +1123,25 @@
       }),
 
       ja: Object.freeze({
-        'app.title': 'Starlight 難易度ダウンローダー',
+        'app.title': 'BMS 難易度表ダウンローダー',
         'app.language': '言語',
+        'app.table': '難易度表',
         'app.level': 'レベル',
         'app.loading': '読み込み中…',
         'app.requiredPage': 'このツールは BMS Library の Songs ページで実行してください。',
         'app.openRequiredPage': 'Songs ページを開いてから、ブックマークレットをもう一度実行してください。',
-        'app.loadFailureTitle': 'Starlight 難易度ダウンローダーの起動に失敗しました',
+        'app.loadFailureTitle': 'BMS 難易度表ダウンローダーの起動に失敗しました',
         'app.verifySongsPage': 'BMS Library の Songs ページが正常に開けるか確認してください。',
 
         'button.searchLevel': 'このレベルを検索',
-        'button.searchSpecificLevel': 'sr{level} を検索',
+        'button.searchSpecificLevel': '{levelLabel} を検索',
         'button.selectMatched': '高確度を選択',
+        'button.selectVisible': '表示中をすべて選択',
+        'button.clearSelection': '選択解除',
+        'button.refreshSearch': '再検索',
+        'button.chooseFolder': '保存先フォルダーを選択',
+        'button.changeFolder': '保存先: {name}',
+        'button.useBrowserDownloads': 'ブラウザー保存を使用',
         'button.queueSelected': '選択 → キュー',
         'button.exportCsv': '検索結果 CSV',
         'button.stopSearch': '検索を停止',
@@ -928,6 +1157,7 @@
         'button.removeRecord': '履歴を削除',
 
         'filter.all': 'すべて',
+        'filter.pending': '未ダウンロード',
         'filter.matched': '高確度',
         'filter.review': '要確認',
         'filter.missing': '未一致',
@@ -936,11 +1166,12 @@
         'queue.title': 'ダウンロードキュー',
         'queue.batchPrefix': '1回に',
         'queue.batchSuffix': '件',
+        'queue.safeBatch': 'サーバー許容量まで（自動）',
         'queue.pendingCount': '{count}件待機',
         'queue.historyCount': '送信履歴 {count}件',
         'queue.empty': 'キューは空です。',
         'queue.saved': 'キューと進行状況はページを閉じても保存されます。',
-        'queue.nextItem': '次のファイル: sr{level} {title}',
+        'queue.nextItem': '次のファイル: {levelLabel} {title}',
         'queue.added': '{added}件をキューに追加しました。',
         'queue.addedWithSkips': '{added}件追加 · 送信済み {requested}件 · キュー重複 {queued}件をスキップ',
         'queue.nothingAdded': '追加できる新しいファイルがありません。すでにキュー内、または送信済みです。',
@@ -949,7 +1180,7 @@
         'queue.restored': '以前のキュー {pending}件と送信履歴 {history}件を復元しました。',
         'queue.pruned': '送信済み履歴と重複するキュー {count}件を自動的にスキップしました。',
         'queue.downloadStarting': 'ダウンロード要求を開始します。複数ファイルの許可をブラウザーに求められた場合は許可してください。',
-        'queue.processingItem': '今回 {current}/{target}: sr{level} {title}',
+        'queue.processingItem': '今回 {current}/{target}: {levelLabel} {title}',
         'queue.batchComplete': '今回 {completed}件を送信 · 残り {remaining}件。次は再開ボタンを押してください。',
         'queue.allComplete': 'キューの {completed}件をすべてブラウザーへ送信しました。',
         'queue.skippedCompleted': '送信済み {count}件をスキップし、次のファイルから再開します。',
@@ -959,23 +1190,25 @@
         'queue.limitTodaySuffix': ' 本日の残り {count}件',
         'queue.windowUsed': '今回の許容量を使い切りました。{time} 以降に再開してください。',
         'queue.limitExpired': '制限時間が終了しました。再開ボタンを押してください。',
-        'queue.lastRequested': '最後の送信: sr{level} {title}',
+        'queue.lastRequested': '最後の送信: {levelLabel} {title}',
 
         'rate.unknown': 'サーバー制限: 最初のダウンロード時に確認',
         'rate.blocked': '短時間制限中 · {time} に解除 · 残り {remaining}',
         'rate.remaining': 'サーバー残数 · 今回 {window} · 本日 {today}',
         'rate.nextReset': 'サーバーが案内した次の解除時刻',
 
-        'status.loadingTable': '公式難易度表を読み込み中…',
-        'status.tableLoaded': '公式表を読み込みました。sr{level} の検索を開始します。{restored}',
+        'status.loadingTable': '{table} 難易度表を読み込み中…',
+        'status.tableLoaded': '{table} 表の {count}譜面を読み込みました。レベルを選んで検索ボタンを押してください。{restored}',
         'status.tableRestoredSuffix': ' 保存済みキュー {queue}件と履歴 {history}件を復元しました。',
-        'status.noLevel': '公式表に sr{level} の項目が見つかりません。',
-        'status.levelConfirmed': '公式 sr{level} の {count}譜面を確認しました。ライブミラーと照合します。',
-        'status.searching': 'sr{level} 検索 {current}/{total}: {title}',
-        'status.searchStopped': 'sr{level} の検索を停止しました。現在までの {count}件は利用できます。',
-        'status.searchComplete': '完了: 公式 sr{level} {count}件の照合結果です。ファイル名を確認してキューへ追加してください。',
-        'status.failure': '失敗: {error}',
-        'status.counts': 'sr{level} 全{total} · 高確度 {matched} · 要確認 {review} · 未一致 {missing} · 送信済み {requested}',
+        'status.noLevel': '公式表に {levelLabel} の項目が見つかりません。',
+        'status.levelConfirmed': '公式 {levelLabel} の {count}譜面を確認しました。ライブミラーと照合します。',
+        'status.searching': '{levelLabel} 検索 {current}/{total}: {title}',
+        'status.searchStopped': '{levelLabel} の検索を停止しました。現在までの {count}件は利用できます。',
+        'status.searchComplete': '完了: 公式 {levelLabel} {count}件の照合結果です。ファイル名を確認してキューへ追加してください。',
+        'status.searchCacheRestored': '保存済みの {levelLabel} 検索結果 {count}件を復元しました。（保存日時: {time}）API 再検索なしですぐ利用できます。',
+        'status.searchCacheResumed': '保存済みの {levelLabel} 結果 {current}/{total}件を復元し、残りだけ検索します。',
+        'status.failure': '{table} 表の読み込み失敗: {error}',
+        'status.counts': '{levelLabel} 全{total} · 高確度 {matched} · 要確認 {review} · 未一致 {missing} · 送信済み {requested}',
 
         'classification.matched': '高確度',
         'classification.review': '要確認',
@@ -988,6 +1221,10 @@
         'download.allRequested': '必要ファイルをすべて送信済み',
         'download.candidateRequested': 'ブラウザーへ送信済み',
         'download.definition': '「送信済み」は、サーバーがダウンロード URL を発行し、ファイルをブラウザーへ渡した状態です。ブラウザーまたはディスクで保存が完了したかどうかは、このページから確認できません。',
+        'download.folderSelected': 'この実行では「{name}」フォルダーへ直接保存します。同名ファイルは上書きしません。',
+        'download.folderUnsupported': 'このブラウザーはフォルダーへの直接保存に対応していません。Chrome/Edge またはブラウザーの保存先設定を使用してください。',
+        'download.folderFailure': '保存先フォルダーを使用できません: {error}',
+        'download.browserSelected': 'ブラウザー標準のダウンロード方式に切り替えました。',
 
         'table.select': '選択',
         'table.index': '#',
@@ -1021,7 +1258,7 @@
         'history.cleared': 'ダウンロード履歴をすべて削除しました。',
         'history.recordRemoved': '送信済み履歴を削除しました。',
         'history.retryQueued': '履歴を解除し、ファイルをキューに追加しました。',
-        'history.exportName': 'starlight_download_history_{date}.csv',
+        'history.exportName': 'bms_table_download_history_{date}.csv',
 
         'confirm.clearQueue': 'キュー {count}件をすべて削除しますか？',
         'confirm.clearHistory': '送信履歴 {count}件をすべて削除しますか？ 以後、同じファイルが重複ダウンロードされる可能性があります。',
@@ -1060,18 +1297,25 @@
       }),
 
       en: Object.freeze({
-        'app.title': 'Starlight Difficulty Downloader',
+        'app.title': 'BMS Difficulty Table Downloader',
         'app.language': 'Language',
+        'app.table': 'Table',
         'app.level': 'Level',
         'app.loading': 'Loading…',
         'app.requiredPage': 'Run this tool on the BMS Library Songs page.',
         'app.openRequiredPage': 'Open the Songs page, then run the bookmarklet again.',
-        'app.loadFailureTitle': 'Starlight Difficulty Downloader failed to start',
+        'app.loadFailureTitle': 'BMS Difficulty Table Downloader failed to start',
         'app.verifySongsPage': 'Make sure the BMS Library Songs page opens correctly.',
 
         'button.searchLevel': 'Search this level',
-        'button.searchSpecificLevel': 'Search sr{level}',
+        'button.searchSpecificLevel': 'Search {levelLabel}',
         'button.selectMatched': 'Select high confidence',
+        'button.selectVisible': 'Select all visible',
+        'button.clearSelection': 'Clear selection',
+        'button.refreshSearch': 'Search again',
+        'button.chooseFolder': 'Choose save folder',
+        'button.changeFolder': 'Save folder: {name}',
+        'button.useBrowserDownloads': 'Use browser downloads',
         'button.queueSelected': 'Selection → Queue',
         'button.exportCsv': 'Search results CSV',
         'button.stopSearch': 'Stop search',
@@ -1087,6 +1331,7 @@
         'button.removeRecord': 'Remove record',
 
         'filter.all': 'All',
+        'filter.pending': 'Not downloaded',
         'filter.matched': 'High confidence',
         'filter.review': 'Review',
         'filter.missing': 'No match',
@@ -1095,11 +1340,12 @@
         'queue.title': 'Download queue',
         'queue.batchPrefix': 'Batch',
         'queue.batchSuffix': 'files',
+        'queue.safeBatch': 'Up to server allowance (auto)',
         'queue.pendingCount': '{count} pending',
         'queue.historyCount': '{count} requested',
         'queue.empty': 'The queue is empty.',
         'queue.saved': 'The queue and progress remain saved after the page is closed.',
-        'queue.nextItem': 'Next file: sr{level} {title}',
+        'queue.nextItem': 'Next file: {levelLabel} {title}',
         'queue.added': 'Added {added} files to the queue.',
         'queue.addedWithSkips': 'Added {added} · skipped {requested} already requested · skipped {queued} queue duplicates',
         'queue.nothingAdded': 'There are no new files to add. They are already queued or recorded as requested.',
@@ -1108,7 +1354,7 @@
         'queue.restored': 'Restored {pending} queued files and {history} requested files.',
         'queue.pruned': 'Automatically skipped {count} queued files already present in request history.',
         'queue.downloadStarting': 'Starting download requests. Allow multiple file downloads if your browser asks.',
-        'queue.processingItem': 'Batch {current}/{target}: sr{level} {title}',
+        'queue.processingItem': 'Batch {current}/{target}: {levelLabel} {title}',
         'queue.batchComplete': 'Requested {completed} in this batch · {remaining} remaining. Press Resume for the next batch.',
         'queue.allComplete': 'Sent all {completed} queued files to the browser.',
         'queue.skippedCompleted': 'Skipped {count} already requested files and resumed from the next item.',
@@ -1118,23 +1364,25 @@
         'queue.limitTodaySuffix': ' {count} requests remain today.',
         'queue.windowUsed': 'This window’s allowance has been used. Resume after {time}.',
         'queue.limitExpired': 'The limit window has reset. Press Resume to continue.',
-        'queue.lastRequested': 'Last requested: sr{level} {title}',
+        'queue.lastRequested': 'Last requested: {levelLabel} {title}',
 
         'rate.unknown': 'Server limit: checked on first download',
         'rate.blocked': 'Short-term limit · resets {time} · {remaining} remaining',
         'rate.remaining': 'Server allowance · window {window} · today {today}',
         'rate.nextReset': 'the next reset time reported by the server',
 
-        'status.loadingTable': 'Loading the official difficulty table…',
-        'status.tableLoaded': 'Official table loaded. Starting the sr{level} search.{restored}',
+        'status.loadingTable': 'Loading the {table} difficulty table…',
+        'status.tableLoaded': 'Loaded {count} charts from {table}. Choose a level and press the search button.{restored}',
         'status.tableRestoredSuffix': ' Restored {queue} queued files and {history} history records.',
-        'status.noLevel': 'No sr{level} entries were found in the official table.',
-        'status.levelConfirmed': 'Found {count} official sr{level} charts. Comparing live mirror results.',
-        'status.searching': 'Searching sr{level} {current}/{total}: {title}',
-        'status.searchStopped': 'Stopped the sr{level} search. The {count} results found so far remain available.',
-        'status.searchComplete': 'Done: {count} official sr{level} charts were compared. Verify file names before adding them to the queue.',
-        'status.failure': 'Failed: {error}',
-        'status.counts': 'sr{level} total {total} · high confidence {matched} · review {review} · no match {missing} · requested {requested}',
+        'status.noLevel': 'No {levelLabel} entries were found in the official table.',
+        'status.levelConfirmed': 'Found {count} official {levelLabel} charts. Comparing live mirror results.',
+        'status.searching': 'Searching {levelLabel} {current}/{total}: {title}',
+        'status.searchStopped': 'Stopped the {levelLabel} search. The {count} results found so far remain available.',
+        'status.searchComplete': 'Done: {count} official {levelLabel} charts were compared. Verify file names before adding them to the queue.',
+        'status.searchCacheRestored': 'Restored {count} saved {levelLabel} results (saved {time}). They are ready without repeating API searches.',
+        'status.searchCacheResumed': 'Restored {current}/{total} saved {levelLabel} results and will search only the remainder.',
+        'status.failure': 'Could not load {table}: {error}',
+        'status.counts': '{levelLabel} total {total} · high confidence {matched} · review {review} · no match {missing} · requested {requested}',
 
         'classification.matched': 'High confidence',
         'classification.review': 'Review recommended',
@@ -1147,6 +1395,10 @@
         'download.allRequested': 'All required files requested',
         'download.candidateRequested': 'Sent to browser',
         'download.definition': '“Requested” means the server issued a download URL and the file was handed to the browser. A web page cannot verify that the browser or disk finished saving it.',
+        'download.folderSelected': 'Downloads will be saved directly to “{name}” for this run. Existing files are never overwritten.',
+        'download.folderUnsupported': 'This browser cannot save directly to a selected folder. Use Chrome/Edge or the browser download-location setting.',
+        'download.folderFailure': 'The selected folder cannot be used: {error}',
+        'download.browserSelected': 'Switched to the browser’s default download flow.',
 
         'table.select': 'Select',
         'table.index': '#',
@@ -1180,7 +1432,7 @@
         'history.cleared': 'All download history was cleared.',
         'history.recordRemoved': 'The requested-file record was removed.',
         'history.retryQueued': 'Removed the record and added the file back to the queue.',
-        'history.exportName': 'starlight_download_history_{date}.csv',
+        'history.exportName': 'bms_table_download_history_{date}.csv',
 
         'confirm.clearQueue': 'Clear all {count} files from the queue?',
         'confirm.clearHistory': 'Clear all {count} requested-file records? The same files may be downloaded again afterward.',
@@ -1273,7 +1525,7 @@
     const { start } = require('./app');
 
     start().catch((error) => {
-      console.error('[Starlight Difficulty Downloader]', error);
+      console.error('[BMS Difficulty Table Downloader]', error);
     });
   },
   "matcher.js": function(module, exports, require) {
@@ -1347,6 +1599,7 @@
     }
 
     function getFallbacks(chart) {
+      if (chart?.tableId && chart.tableId !== 'starlight') return [];
       const title = normalize(stripDifficulty(chart.title));
       return DIRECT_FALLBACKS.filter((entry) => {
         const key = normalize(entry.title);
@@ -1374,6 +1627,13 @@
       const topSong = result?.song?.matches?.[0];
       const topSabun = result?.sabun?.matches?.[0];
       const chart = result?.chart || {};
+      const metadata = {
+        level: String(chart.level ?? ''),
+        levelLabel: String(chart.levelSymbol || 'sr') + String(chart.level ?? ''),
+        levelSymbol: String(chart.levelSymbol || 'sr'),
+        tableId: String(chart.tableId || 'starlight'),
+        tableName: String(chart.tableName || 'Starlight')
+      };
 
       if (chart.url_diff && topSong?.item?.id && topSabun?.item?.id) {
         selections.push({
@@ -1381,14 +1641,14 @@
           id: String(topSong.item.id),
           title: String(chart.title || itemDisplay(topSong.item)),
           sourceName: itemDisplay(topSong.item),
-          level: String(chart.level ?? '')
+          ...metadata
         });
         selections.push({
           type: 'sabun',
           id: String(topSabun.item.id),
           title: String(chart.title || itemDisplay(topSabun.item)),
           sourceName: itemDisplay(topSabun.item),
-          level: String(chart.level ?? '')
+          ...metadata
         });
         return selections;
       }
@@ -1400,7 +1660,7 @@
           id: String(top.item.id),
           title: String(chart.title || itemDisplay(top.item)),
           sourceName: itemDisplay(top.item),
-          level: String(chart.level ?? '')
+          ...metadata
         });
       }
       return selections;
@@ -1584,6 +1844,10 @@
             title: String(rawItem.title || rawItem.id),
             sourceName: String(rawItem.sourceName || ''),
             level: String(rawItem.level ?? state.selectedLevel ?? ''),
+            levelLabel: String(rawItem.levelLabel || `${state.selectedTable?.symbol || 'sr'}${rawItem.level ?? state.selectedLevel ?? ''}`),
+            levelSymbol: String(rawItem.levelSymbol || state.selectedTable?.symbol || 'sr'),
+            tableId: String(rawItem.tableId || state.selectedTableId || 'starlight'),
+            tableName: String(rawItem.tableName || state.selectedTable?.name || 'Starlight'),
             addedAt: new Date().toISOString(),
             attempts: 0,
             lastAttemptAt: null,
@@ -1617,12 +1881,96 @@
 
       function triggerBrowserDownload(downloadUrl) {
         const absolute = new URL(downloadUrl, config.downloadBaseUrl).toString();
+        // Keep error/limit pages out of the current tab. A response without an
+        // attachment header is rendered inside this hidden frame instead.
+        const frame = document.createElement('iframe');
+        frame.name = `sld-download-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        frame.style.display = 'none';
+        document.body.appendChild(frame);
         const link = document.createElement('a');
         link.href = absolute;
+        link.target = frame.name;
         link.style.display = 'none';
         document.body.appendChild(link);
         link.click();
         link.remove();
+      }
+
+      function safeFileName(value, fallback) {
+        const cleaned = String(value || '')
+          .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+          .replace(/[. ]+$/g, '')
+          .trim();
+        return cleaned || fallback;
+      }
+
+      function fileNameFromResponse(response, payload, item) {
+        const disposition = response.headers?.get?.('content-disposition') || '';
+        const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+        const basic = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+        let headerName = basic || '';
+        if (encoded) {
+          try { headerName = decodeURIComponent(encoded); } catch { headerName = encoded; }
+        }
+        let urlName = '';
+        try { urlName = decodeURIComponent(new URL(response.url || payload.downloadUrl, config.downloadBaseUrl).pathname.split('/').pop() || ''); } catch {}
+        return safeFileName(
+          headerName || payload.fileName || payload.filename || urlName,
+          `${item.type}-${item.id}.zip`
+        );
+      }
+
+      async function unusedFileHandle(directory, fileName) {
+        const dot = fileName.lastIndexOf('.');
+        const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
+        const extension = dot > 0 ? fileName.slice(dot) : '';
+        for (let suffix = 0; suffix < 10000; suffix += 1) {
+          const candidate = suffix ? `${stem} (${suffix})${extension}` : fileName;
+          try {
+            await directory.getFileHandle(candidate, { create: false });
+          } catch (error) {
+            if (error?.name === 'NotFoundError') return directory.getFileHandle(candidate, { create: true });
+            throw error;
+          }
+        }
+        throw new Error('Could not create a unique filename in the selected folder.');
+      }
+
+      async function saveToSelectedDirectory(directory, payload, item) {
+        const absolute = new URL(payload.downloadUrl, config.downloadBaseUrl).toString();
+        const fetchFn = options.fetchFn || globalThis.fetch?.bind(globalThis);
+        if (!fetchFn) throw new Error('This browser cannot save directly to a selected folder.');
+        const response = await fetchFn(absolute, { credentials: 'include' });
+        if (!response.ok) {
+          const error = new Error(`File download failed: ${response.status} ${response.statusText}`);
+          error.status = response.status;
+          throw error;
+        }
+        const contentType = response.headers?.get?.('content-type') || '';
+        if (/^(?:text\/html|application\/json)\b/i.test(contentType)) {
+          throw new Error(`The download server returned ${contentType} instead of an archive.`);
+        }
+        const fileHandle = await unusedFileHandle(directory, fileNameFromResponse(response, payload, item));
+        const writable = await fileHandle.createWritable();
+        try {
+          if (response.body?.pipeTo) {
+            await response.body.pipeTo(writable);
+          } else {
+            await writable.write(await response.blob());
+            await writable.close();
+          }
+        } catch (error) {
+          await writable.abort?.().catch?.(() => {});
+          throw error;
+        }
+      }
+
+      async function deliverDownload(payload, item) {
+        if (state.downloadDirectoryHandle) {
+          await saveToSelectedDirectory(state.downloadDirectoryHandle, payload, item);
+          return;
+        }
+        triggerBrowserDownload(payload.downloadUrl);
       }
 
       async function process(maxItems = state.batchSize) {
@@ -1648,7 +1996,10 @@
 
         let completed = 0;
         let skipped = initiallyPruned;
-        const requestedTarget = Math.max(1, Number(maxItems) || config.defaultBatchSize);
+        const safeMode = maxItems === config.safeBatchValue;
+        const requestedTarget = safeMode
+          ? state.downloadQueue.length
+          : Math.max(1, Number(maxItems) || config.defaultBatchSize);
         const knownWindowRemaining = Number(state.rateInfo?.remainingInWindow);
         const target = Number.isFinite(knownWindowRemaining) && knownWindowRemaining > 0
           ? Math.min(requestedTarget, knownWindowRemaining)
@@ -1667,7 +2018,7 @@
           state.queueMessage = translator.t('queue.processingItem', {
             current: completed + 1,
             target,
-            level: item.level,
+            levelLabel: item.levelLabel || `sr${item.level}`,
             title: item.title
           });
           item.attempts = Number(item.attempts || 0) + 1;
@@ -1679,7 +2030,7 @@
           try {
             const payload = await api.grant(item.type, item.id);
             applyRateInfo(payload, false);
-            triggerBrowserDownload(payload.downloadUrl);
+            await deliverDownload(payload, item);
 
             // Record first, then remove from the queue. If execution is interrupted between
             // these two writes, the next run prunes the remaining queue item by history key.
@@ -1821,6 +2172,10 @@
           id: String(item.id),
           title: String(item.title || item.id),
           level: String(item.level ?? ''),
+          levelLabel: String(item.levelLabel || `sr${item.level ?? ''}`),
+          levelSymbol: String(item.levelSymbol || 'sr'),
+          tableId: String(item.tableId || 'starlight'),
+          tableName: String(item.tableName || 'Starlight'),
           sourceName: String(item.sourceName || ''),
           addedAt: item.addedAt || new Date().toISOString(),
           attempts: Number.isFinite(Number(item.attempts)) ? Number(item.attempts) : 0,
@@ -1856,6 +2211,65 @@
         return Array.isArray(value) ? value : [];
       }
 
+      function searchResultKey(tableId, level) {
+        return `${String(tableId || 'starlight')}:${String(level ?? '')}`;
+      }
+
+      function normalizeSearchCache(value) {
+        if (!value || typeof value !== 'object' || !Array.isArray(value.entries)) return { entries: [] };
+        const entries = value.entries.filter((entry) => (
+          entry
+          && typeof entry === 'object'
+          && typeof entry.tableId === 'string'
+          && entry.level !== undefined
+          && Array.isArray(entry.rows)
+        )).map((entry) => ({
+          key: searchResultKey(entry.tableId, entry.level),
+          tableId: entry.tableId,
+          level: String(entry.level),
+          savedAt: entry.savedAt || new Date(0).toISOString(),
+          complete: Boolean(entry.complete),
+          rows: entry.rows
+        }));
+        return { entries };
+      }
+
+      function loadSearchResults() {
+        return normalizeSearchCache(readJson(CONFIG.storage.searchResults, { entries: [] }));
+      }
+
+      function loadSearchResult(tableId, level) {
+        const key = searchResultKey(tableId, level);
+        return loadSearchResults().entries.find((entry) => entry.key === key) || null;
+      }
+
+      function saveSearchResult(tableId, level, rows, complete = false) {
+        const key = searchResultKey(tableId, level);
+        const cache = loadSearchResults();
+        const next = {
+          key,
+          tableId: String(tableId || 'starlight'),
+          level: String(level ?? ''),
+          savedAt: new Date().toISOString(),
+          complete: Boolean(complete),
+          rows: Array.isArray(rows) ? rows : []
+        };
+        cache.entries = [next, ...cache.entries.filter((entry) => entry.key !== key)]
+          .slice(0, CONFIG.searchCacheLimit);
+        while (cache.entries.length) {
+          if (writeJson(CONFIG.storage.searchResults, cache)) return true;
+          cache.entries.pop();
+        }
+        return false;
+      }
+
+      function clearSearchResult(tableId, level) {
+        const key = searchResultKey(tableId, level);
+        const cache = loadSearchResults();
+        cache.entries = cache.entries.filter((entry) => entry.key !== key);
+        return writeJson(CONFIG.storage.searchResults, cache);
+      }
+
       return {
         readJson,
         writeJson,
@@ -1877,7 +2291,11 @@
         },
         clearHistory() {
           return writeJson(CONFIG.storage.history, []);
-        }
+        },
+        loadSearchResults,
+        loadSearchResult,
+        saveSearchResult,
+        clearSearchResult
       };
     }
 
@@ -1952,11 +2370,124 @@
 
     module.exports = { buildStyles };
   },
+  "tables.js": function(module, exports, require) {
+    'use strict';
+
+    const MIRROR_BASE = 'https://raw.githubusercontent.com/yuupmu/BMS_starlight_difficulty_downloader/main/docs/data';
+
+    const TABLE_CATALOG = Object.freeze([
+      Object.freeze({
+        id: 'starlight',
+        name: 'Starlight',
+        symbol: 'sr',
+        defaultLevel: '10',
+        sourceUrl: 'https://djkuroakari.github.io/starlighttable.html',
+        dataUrl: 'https://raw.githubusercontent.com/DJKuroakari/DJKuroakari.github.io/refs/heads/main/data.json',
+        levelOrder: Object.freeze(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '?', '!'])
+      }),
+      Object.freeze({
+        id: 'stardust',
+        name: 'Stardust',
+        symbol: 'ξ',
+        defaultLevel: '10',
+        sourceUrl: 'https://mqppppp.neocities.org/ChartView',
+        dataUrl: `${MIRROR_BASE}/stardust.json`,
+        levelOrder: Object.freeze(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '?'])
+      }),
+      Object.freeze({
+        id: 'satellite',
+        name: 'Satellite',
+        symbol: 'sl',
+        defaultLevel: '10',
+        sourceUrl: 'https://stellabms.xyz/sl/table.html',
+        dataUrl: `${MIRROR_BASE}/satellite.json`,
+        levelOrder: Object.freeze(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'])
+      }),
+      Object.freeze({
+        id: 'stella',
+        name: 'Stella',
+        symbol: 'st',
+        defaultLevel: '10',
+        sourceUrl: 'https://stellabms.xyz/st/table.html',
+        dataUrl: `${MIRROR_BASE}/stella.json`,
+        levelOrder: Object.freeze(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'])
+      }),
+      Object.freeze({
+        id: 'new-generation-normal',
+        name: 'NEW GENERATION Normal',
+        symbol: '▽',
+        defaultLevel: '10',
+        sourceUrl: 'https://rattoto10.jounin.jp/table.html',
+        dataUrl: 'https://rattoto10.github.io/second_table/score.json',
+        levelOrder: Object.freeze(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '11+', '12-', '12', '12+', '?'])
+      }),
+      Object.freeze({
+        id: 'new-generation-insane',
+        name: 'NEW GENERATION Insane',
+        symbol: '▼',
+        defaultLevel: '10',
+        sourceUrl: 'https://rattoto10.jounin.jp/table_insane.html',
+        dataUrl: 'https://rattoto10.github.io/second_table/insane_data.json',
+        levelOrder: Object.freeze(['0-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '?'])
+      })
+    ]);
+
+    function getTable(tableId) {
+      return TABLE_CATALOG.find((table) => table.id === tableId) || TABLE_CATALOG[0];
+    }
+
+    function normalizeLevel(value) {
+      return String(value ?? '').normalize('NFKC').trim();
+    }
+
+    function normalizeTableRows(rows, table) {
+      if (!Array.isArray(rows)) return [];
+      return rows.map((raw) => ({
+        ...raw,
+        title: String(raw?.title || '').trim(),
+        subtitle: String(raw?.subtitle || '').trim(),
+        artist: String(raw?.artist || '').trim(),
+        level: normalizeLevel(raw?.level),
+        url: String(raw?.url || '').trim(),
+        url_diff: String(raw?.url_diff || '').trim(),
+        md5: String(raw?.md5 || '').trim(),
+        sha256: String(raw?.sha256 || '').trim(),
+        tableId: table.id,
+        tableName: table.name,
+        levelSymbol: table.symbol,
+        tableSourceUrl: table.sourceUrl
+      })).filter((row) => row.title && row.level);
+    }
+
+    function sortLevels(levels, table) {
+      const order = new Map((table?.levelOrder || []).map((level, index) => [level, index]));
+      return [...levels].sort((left, right) => {
+        const a = order.has(left) ? order.get(left) : Number.MAX_SAFE_INTEGER;
+        const b = order.has(right) ? order.get(right) : Number.MAX_SAFE_INTEGER;
+        if (a !== b) return a - b;
+        return String(left).localeCompare(String(right), undefined, { numeric: true });
+      });
+    }
+
+    function formatLevel(table, level) {
+      return `${table?.symbol || ''}${normalizeLevel(level)}`;
+    }
+
+    module.exports = {
+      TABLE_CATALOG,
+      getTable,
+      normalizeLevel,
+      normalizeTableRows,
+      sortLevels,
+      formatLevel
+    };
+  },
   "ui.js": function(module, exports, require) {
     'use strict';
 
     const { CONFIG } = require('./config');
     const { buildStyles } = require('./styles');
+    const { formatLevel } = require('./tables');
     const {
       escapeHtml,
       formatLocalDate,
@@ -1995,9 +2526,12 @@
         <header>
           <h2 id="sld-title"></h2>
           <span class="sld-muted">v${escapeHtml(config.version)}</span>
+          <label class="sld-inline"><strong id="sld-table-label"></strong><select id="sld-table"></select></label>
           <label class="sld-inline"><strong id="sld-level-label"></strong><select id="sld-level" disabled><option></option></select></label>
           <button id="sld-load-level" class="sld-primary" disabled></button>
+          <button id="sld-refresh-level" disabled></button>
           <button id="sld-select-matched"></button>
+          <button id="sld-clear-selection"></button>
           <button id="sld-queue-selected" class="sld-primary"></button>
           <button id="sld-export"></button>
           <button id="sld-stop" class="sld-danger"></button>
@@ -2013,6 +2547,7 @@
           <span class="grow"></span>
           <div class="sld-filters">
             <button class="sld-filter sld-active" data-filter="all"></button>
+            <button class="sld-filter" data-filter="pending"></button>
             <button class="sld-filter" data-filter="matched"></button>
             <button class="sld-filter" data-filter="review"></button>
             <button class="sld-filter" data-filter="missing"></button>
@@ -2023,7 +2558,9 @@
           <strong id="sld-queue-title"></strong>
           <span id="sld-queue-count" class="sld-muted"></span>
           <span id="sld-history-count" class="sld-muted"></span>
-          <label class="sld-inline"><span id="sld-batch-prefix"></span><select id="sld-batch-size">${config.allowedBatchSizes.map((size) => `<option value="${size}">${size}</option>`).join('')}</select><span id="sld-batch-suffix"></span></label>
+          <label class="sld-inline"><span id="sld-batch-prefix"></span><select id="sld-batch-size">${config.allowedBatchSizes.map((size) => `<option value="${size}">${size}</option>`).join('')}<option value="${escapeHtml(config.safeBatchValue)}"></option></select><span id="sld-batch-suffix"></span></label>
+          <button id="sld-download-folder"></button>
+          <button id="sld-browser-downloads" hidden></button>
           <button id="sld-run-queue" class="sld-primary"></button>
           <button id="sld-clear-queue"></button>
           <span id="sld-queue-message" class="sld-queue-message sld-muted"></span>
@@ -2068,10 +2605,14 @@
       const get = (selector) => panel.querySelector(selector);
       const els = {
         title: get('#sld-title'),
+        tableLabel: get('#sld-table-label'),
+        table: get('#sld-table'),
         levelLabel: get('#sld-level-label'),
         level: get('#sld-level'),
         loadLevel: get('#sld-load-level'),
+        refreshLevel: get('#sld-refresh-level'),
         selectMatched: get('#sld-select-matched'),
+        clearSelection: get('#sld-clear-selection'),
         queueSelected: get('#sld-queue-selected'),
         export: get('#sld-export'),
         stop: get('#sld-stop'),
@@ -2089,6 +2630,8 @@
         historyCount: get('#sld-history-count'),
         batchPrefix: get('#sld-batch-prefix'),
         batchSize: get('#sld-batch-size'),
+        downloadFolder: get('#sld-download-folder'),
+        browserDownloads: get('#sld-browser-downloads'),
         batchSuffix: get('#sld-batch-suffix'),
         runQueue: get('#sld-run-queue'),
         clearQueue: get('#sld-clear-queue'),
@@ -2129,6 +2672,7 @@
       function rowMatchesFilter(result) {
         if (state.selectedFilter === 'all') return true;
         const coverage = downloadCoverage(result, history);
+        if (state.selectedFilter === 'pending') return !coverage.all;
         if (state.selectedFilter === 'requested') return coverage.all;
         return result.classification?.key === state.selectedFilter;
       }
@@ -2214,7 +2758,7 @@
           if (downloadCoverage(row, history).all) stats.requested += 1;
         }
         els.counts.textContent = translator.t('status.counts', {
-          level: state.selectedLevel,
+          levelLabel: formatLevel(state.selectedTable, state.selectedLevel),
           total: state.charts.length,
           matched: stats.matched,
           review: stats.review,
@@ -2261,13 +2805,13 @@
         els.historyCount.textContent = translator.t('queue.historyCount', { count: history.size() });
         const nextItem = state.downloadQueue[0];
         const defaultQueueMessage = nextItem
-          ? `${translator.t('queue.saved')} ${translator.t('queue.nextItem', { level: nextItem.level, title: nextItem.title })}`
+          ? `${translator.t('queue.saved')} ${translator.t('queue.nextItem', { levelLabel: nextItem.levelLabel || `sr${nextItem.level}`, title: nextItem.title })}`
           : translator.t('queue.empty');
         els.queueMessage.textContent = state.queueMessage || defaultQueueMessage;
 
         const latest = history.latest();
         els.lastRequested.textContent = latest
-          ? translator.t('queue.lastRequested', { level: latest.level, title: latest.title })
+          ? translator.t('queue.lastRequested', { levelLabel: latest.levelLabel || `sr${latest.level}`, title: latest.title })
           : '';
         els.lastRequested.title = latest?.sourceName || latest?.title || '';
 
@@ -2275,6 +2819,12 @@
         els.runQueue.disabled = state.downloadRunning || !state.downloadQueue.length || blocked;
         els.clearQueue.disabled = state.downloadRunning || !state.downloadQueue.length;
         els.batchSize.disabled = state.downloadRunning;
+        els.downloadFolder.disabled = state.downloadRunning;
+        els.downloadFolder.textContent = state.downloadDirectoryHandle
+          ? translator.t('button.changeFolder', { name: state.downloadDirectoryHandle.name })
+          : translator.t('button.chooseFolder');
+        els.browserDownloads.hidden = !state.downloadDirectoryHandle;
+        els.browserDownloads.disabled = state.downloadRunning;
         if (state.downloadRunning) els.runQueue.textContent = translator.t('button.processing');
         else if (blocked) els.runQueue.textContent = translator.t('button.resumeAfterLimit');
         else els.runQueue.textContent = translator.t('button.runQueue');
@@ -2295,7 +2845,7 @@
         const rows = entries.map((entry) => `
           <tr>
             <td>${escapeHtml(formatLocalDate(entry.requestedAt, translator.locale(), translator.t('time.unknown')))}</td>
-            <td>sr${escapeHtml(entry.level)}</td>
+            <td>${escapeHtml(entry.levelLabel || `sr${entry.level}`)}</td>
             <td>${escapeHtml(translator.t(entry.type === 'sabun' ? 'history.sabun' : 'history.song'))}</td>
             <td><div class="sld-title">${escapeHtml(entry.title)}</div>${entry.sourceName ? `<div class="sld-muted">${escapeHtml(entry.sourceName)}</div>` : ''}</td>
             <td><span class="sld-id">${escapeHtml(entry.id)}</span></td>
@@ -2322,9 +2872,14 @@
 
       function updateTranslations() {
         els.title.textContent = translator.t('app.title');
+        els.tableLabel.textContent = translator.t('app.table');
         els.levelLabel.textContent = translator.t('app.level');
-        els.loadLevel.textContent = translator.t('button.searchSpecificLevel', { level: els.level.value || state.selectedLevel });
-        els.selectMatched.textContent = translator.t('button.selectMatched');
+        els.loadLevel.textContent = translator.t('button.searchSpecificLevel', {
+          levelLabel: formatLevel(state.selectedTable, els.level.value || state.selectedLevel)
+        });
+        els.refreshLevel.textContent = translator.t('button.refreshSearch');
+        els.selectMatched.textContent = translator.t('button.selectVisible');
+        els.clearSelection.textContent = translator.t('button.clearSelection');
         els.queueSelected.textContent = translator.t('button.queueSelected');
         els.export.textContent = translator.t('button.exportCsv');
         els.stop.textContent = translator.t('button.stopSearch');
@@ -2333,7 +2888,7 @@
         els.close.textContent = translator.t('button.close');
         els.language.value = translator.language;
 
-        const filterKeys = { all: 'filter.all', matched: 'filter.matched', review: 'filter.review', missing: 'filter.missing', requested: 'filter.requested' };
+        const filterKeys = { all: 'filter.all', pending: 'filter.pending', matched: 'filter.matched', review: 'filter.review', missing: 'filter.missing', requested: 'filter.requested' };
         panel.querySelectorAll('.sld-filter').forEach((button) => {
           button.textContent = translator.t(filterKeys[button.dataset.filter]);
         });
@@ -2341,11 +2896,13 @@
         els.queueTitle.textContent = translator.t('queue.title');
         els.batchPrefix.textContent = translator.t('queue.batchPrefix');
         els.batchSuffix.textContent = translator.t('queue.batchSuffix');
+        els.batchSize.querySelector(`[value="${config.safeBatchValue}"]`).textContent = translator.t('queue.safeBatch');
+        els.browserDownloads.textContent = translator.t('button.useBrowserDownloads');
         els.clearQueue.textContent = translator.t('button.clearQueue');
 
         els.tableHeadings.select.textContent = translator.t('table.select');
         els.tableHeadings.index.textContent = translator.t('table.index');
-        els.chartHeading.textContent = `sr${state.selectedLevel} ${translator.t('table.chart')}`;
+        els.chartHeading.textContent = `${formatLevel(state.selectedTable, state.selectedLevel)} ${translator.t('table.chart')}`;
         els.tableHeadings.artist.textContent = translator.t('table.artist');
         els.tableHeadings.song.textContent = translator.t('table.songResults');
         els.tableHeadings.sabun.textContent = translator.t('table.sabunResults');
@@ -2365,22 +2922,41 @@
         if (!els.historyOverlay.hidden) renderHistory();
       }
 
+      function setTables(tables) {
+        els.table.innerHTML = tables.map((table) => `<option value="${escapeHtml(table.id)}">${escapeHtml(table.name)} (${escapeHtml(table.symbol)})</option>`).join('');
+        els.table.value = state.selectedTableId;
+      }
+
       function setLevels(levels, counts) {
-        els.level.innerHTML = levels.map((level) => `<option value="${escapeHtml(level)}">sr${escapeHtml(level)} (${counts.get(level)})</option>`).join('');
+        els.level.innerHTML = levels.map((level) => `<option value="${escapeHtml(level)}">${escapeHtml(formatLevel(state.selectedTable, level))} (${counts.get(level)})</option>`).join('');
         els.level.value = state.selectedLevel;
         els.level.disabled = false;
         els.loadLevel.disabled = false;
-        els.loadLevel.textContent = translator.t('button.searchSpecificLevel', { level: state.selectedLevel });
+        els.refreshLevel.disabled = false;
+        els.loadLevel.textContent = translator.t('button.searchSpecificLevel', {
+          levelLabel: formatLevel(state.selectedTable, state.selectedLevel)
+        });
+      }
+
+      function setTableLoading(loading) {
+        els.table.disabled = loading || state.searchRunning;
+        els.level.disabled = loading || state.searchRunning || !state.levels.length;
+        els.loadLevel.disabled = loading || state.searchRunning || !state.levels.length;
+        els.refreshLevel.disabled = loading || state.searchRunning || !state.levels.length;
       }
 
       function setSearchRunning(running) {
         els.stop.disabled = !running;
         if (running) {
+          els.table.disabled = true;
           els.level.disabled = true;
           els.loadLevel.disabled = true;
+          els.refreshLevel.disabled = true;
         } else if (state.levels.length) {
+          els.table.disabled = false;
           els.level.disabled = false;
           els.loadLevel.disabled = false;
+          els.refreshLevel.disabled = false;
         }
       }
 
@@ -2393,11 +2969,15 @@
         els.progress.value = Math.max(0, Number(value) || 0);
       }
 
-      function selectMatchedRows() {
+      function selectVisibleRows() {
         panel.querySelectorAll('tbody tr').forEach((tr) => {
           const checkbox = tr.querySelector('.sld-row-select');
-          if (checkbox) checkbox.checked = !checkbox.disabled && tr.dataset.status === 'matched';
+          if (checkbox) checkbox.checked = !tr.hidden && !checkbox.disabled;
         });
+      }
+
+      function clearSelectedRows() {
+        panel.querySelectorAll('.sld-row-select').forEach((checkbox) => { checkbox.checked = false; });
       }
 
       function selectedRowIndexes() {
@@ -2424,15 +3004,24 @@
       });
 
       els.loadLevel.addEventListener('click', () => handlers.onSearchLevel?.(els.level.value));
+      els.refreshLevel.addEventListener('click', () => handlers.onRefreshLevel?.(els.level.value));
+      els.table.addEventListener('change', () => handlers.onTableChange?.(els.table.value));
       els.level.addEventListener('change', () => {
-        els.loadLevel.textContent = translator.t('button.searchSpecificLevel', { level: els.level.value });
+        state.selectedLevel = els.level.value;
+        els.loadLevel.textContent = translator.t('button.searchSpecificLevel', {
+          levelLabel: formatLevel(state.selectedTable, els.level.value)
+        });
+        handlers.onLevelChange?.(els.level.value);
       });
       els.stop.addEventListener('click', () => handlers.onStopSearch?.());
       els.close.addEventListener('click', () => handlers.onClose?.());
-      els.selectMatched.addEventListener('click', () => selectMatchedRows());
+      els.selectMatched.addEventListener('click', () => selectVisibleRows());
+      els.clearSelection.addEventListener('click', () => clearSelectedRows());
       els.queueSelected.addEventListener('click', () => handlers.onQueueSelected?.(selectedRowIndexes()));
       els.export.addEventListener('click', () => handlers.onExportSearch?.());
-      els.batchSize.addEventListener('change', () => handlers.onBatchSizeChange?.(Number(els.batchSize.value)));
+      els.batchSize.addEventListener('change', () => handlers.onBatchSizeChange?.(els.batchSize.value));
+      els.downloadFolder.addEventListener('click', () => handlers.onChooseDirectory?.());
+      els.browserDownloads.addEventListener('click', () => handlers.onUseBrowserDownloads?.());
       els.runQueue.addEventListener('click', () => handlers.onRunQueue?.());
       els.clearQueue.addEventListener('click', () => {
         if (!state.downloadQueue.length) return;
@@ -2457,14 +3046,16 @@
       });
 
       updateTranslations();
-      setStatus(translator.t('status.loadingTable'));
+      setStatus(translator.t('status.loadingTable', { table: state.selectedTable?.name || '' }));
       setSearchRunning(false);
 
       return {
         panel,
         style,
         els,
+        setTables,
         setLevels,
+        setTableLoading,
         setStatus,
         setProgress,
         setSearchRunning,

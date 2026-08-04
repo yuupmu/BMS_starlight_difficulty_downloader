@@ -8,6 +8,13 @@ const { createApi } = require('./api');
 const { createQueueManager } = require('./queue');
 const { createUi } = require('./ui');
 const {
+  TABLE_CATALOG,
+  getTable,
+  normalizeTableRows,
+  sortLevels,
+  formatLevel
+} = require('./tables');
+const {
   classify,
   getFallbacks,
   findMatches,
@@ -17,7 +24,6 @@ const {
   downloadCoverage
 } = require('./matcher');
 const {
-  levelSort,
   createCsv,
   downloadTextFile
 } = require('./utils');
@@ -44,24 +50,40 @@ async function start() {
     limit: CONFIG.historyLimit
   });
 
-  const batchSize = CONFIG.allowedBatchSizes.includes(Number(savedPrefs.batchSize))
-    ? Number(savedPrefs.batchSize)
-    : CONFIG.defaultBatchSize;
+  const batchSize = savedPrefs.batchSize === CONFIG.safeBatchValue
+    ? CONFIG.safeBatchValue
+    : CONFIG.allowedBatchSizes.includes(Number(savedPrefs.batchSize))
+      ? Number(savedPrefs.batchSize)
+      : CONFIG.defaultBatchSize;
+
+  const selectedTable = getTable(savedPrefs.selectedTableId || CONFIG.defaultTableId);
+  const savedSelectedLevels = savedPrefs.selectedLevels && typeof savedPrefs.selectedLevels === 'object'
+    ? savedPrefs.selectedLevels
+    : {};
+  const initialLevel = savedSelectedLevels[selectedTable.id]
+    ?? (selectedTable.id === 'starlight' ? savedPrefs.selectedLevel : null)
+    ?? selectedTable.defaultLevel;
 
   const state = {
+    tables: TABLE_CATALOG,
     table: [],
     levels: [],
     levelCounts: new Map(),
     charts: [],
     rows: [],
-    selectedLevel: String(savedPrefs.selectedLevel ?? CONFIG.defaultLevel),
+    selectedTableId: selectedTable.id,
+    selectedTable,
+    selectedLevels: { ...savedSelectedLevels, [selectedTable.id]: String(initialLevel) },
+    selectedLevel: String(initialLevel),
     selectedFilter: 'all',
     searchStopped: false,
     searchRunning: false,
     searchRunId: 0,
-    statusDescriptor: { key: 'status.loadingTable', variables: {} },
+    tableLoadRunId: 0,
+    statusDescriptor: { key: 'status.loadingTable', variables: { table: selectedTable.name } },
     downloadQueue: storage.loadQueue(),
     downloadRunning: false,
+    downloadDirectoryHandle: null,
     batchSize,
     blockedUntil: Number(savedPrefs.blockedUntil) || 0,
     rateInfo: savedPrefs.rateInfo && typeof savedPrefs.rateInfo === 'object' ? savedPrefs.rateInfo : null,
@@ -79,6 +101,8 @@ async function start() {
   function savePrefs() {
     storage.savePrefs({
       selectedLevel: state.selectedLevel,
+      selectedTableId: state.selectedTableId,
+      selectedLevels: state.selectedLevels,
       batchSize: state.batchSize,
       blockedUntil: state.blockedUntil,
       rateInfo: state.rateInfo,
@@ -92,7 +116,7 @@ async function start() {
   }
 
   function refreshStatus() {
-    const descriptor = state.statusDescriptor || { key: 'status.loadingTable', variables: {} };
+    const descriptor = state.statusDescriptor || { key: 'status.loadingTable', variables: { table: state.selectedTable.name } };
     ui?.setStatus(translator.t(descriptor.key, descriptor.variables));
   }
 
@@ -124,7 +148,136 @@ async function start() {
     state.queueMessage = translator.t('queue.pruned', { count: initiallyPruned });
   }
 
-  async function startLevelSearch(level) {
+  async function loadTable(tableId, options = {}) {
+    const descriptor = getTable(tableId);
+    const loadRunId = state.tableLoadRunId + 1;
+    state.tableLoadRunId = loadRunId;
+    state.searchStopped = true;
+    state.searchRunning = false;
+    state.searchRunId += 1;
+    state.selectedTableId = descriptor.id;
+    state.selectedTable = descriptor;
+    state.selectedLevel = String(state.selectedLevels[descriptor.id] ?? descriptor.defaultLevel);
+    state.table = [];
+    state.levels = [];
+    state.levelCounts = new Map();
+    state.charts = [];
+    state.rows = [];
+    state.selectedFilter = 'all';
+    savePrefs();
+
+    if (ui) {
+      ui.els.table.value = descriptor.id;
+      ui.els.level.innerHTML = '<option></option>';
+      ui.els.body.innerHTML = '';
+      ui.setProgress(0, 1);
+      ui.setSearchRunning(false);
+      ui.setTableLoading(true);
+      ui.updateTranslations();
+    }
+    setStatus('status.loadingTable', { table: descriptor.name });
+
+    try {
+      const rawRows = await api.fetchTable(descriptor);
+      if (state.destroyed || loadRunId !== state.tableLoadRunId) return false;
+      const table = normalizeTableRows(rawRows, descriptor);
+      if (!table.length) throw new Error('No usable charts found in the official table.');
+      state.table = table;
+
+      const counts = new Map();
+      for (const entry of table) counts.set(entry.level, (counts.get(entry.level) || 0) + 1);
+      state.levelCounts = counts;
+      state.levels = sortLevels(counts.keys(), descriptor);
+      if (!state.levels.includes(state.selectedLevel)) {
+        state.selectedLevel = state.levels.includes(descriptor.defaultLevel)
+          ? descriptor.defaultLevel
+          : state.levels[0];
+      }
+      state.selectedLevels[descriptor.id] = state.selectedLevel;
+
+      ui.setLevels(state.levels, counts);
+      ui.setTableLoading(false);
+      savePrefs();
+
+      const restored = state.downloadQueue.length || history.size()
+        ? translator.t('status.tableRestoredSuffix', {
+          queue: state.downloadQueue.length,
+          history: history.size()
+        })
+        : '';
+      setStatus('status.tableLoaded', { table: descriptor.name, count: table.length, restored });
+      ui.renderQueue();
+      return true;
+    } catch (error) {
+      if (state.destroyed || loadRunId !== state.tableLoadRunId) return false;
+      console.error(error);
+      ui.setTableLoading(false);
+      setStatus('status.failure', { table: descriptor.name, error: error?.message || String(error) });
+      if (options.initial) {
+        alert(`${translator.t('app.loadFailureTitle')}\n\n${error?.message || error}\n\n${translator.t('app.verifySongsPage')}`);
+      }
+      return false;
+    }
+  }
+
+  function chartIdentity(chart) {
+    return String(chart?.sha256 || chart?.url_diff || chart?.url || `${chart?.title || ''}|${chart?.artist || ''}`);
+  }
+
+  function cacheableRows(rows) {
+    const compactSource = (source) => ({
+      error: String(source?.error || ''),
+      matches: (source?.matches || []).map((match) => ({
+        score: Number(match.score) || 0,
+        query: String(match.query || ''),
+        item: {
+          id: String(match.item?.id || ''),
+          title: String(match.item?.title || ''),
+          subtitle: String(match.item?.subtitle || ''),
+          name: String(match.item?.name || ''),
+          path: String(match.item?.path || ''),
+          artist: String(match.item?.artist || '')
+        }
+      }))
+    });
+    return rows.map((row) => ({
+      chart: {
+        title: String(row.chart?.title || ''),
+        subtitle: String(row.chart?.subtitle || ''),
+        artist: String(row.chart?.artist || ''),
+        level: String(row.chart?.level || ''),
+        url: String(row.chart?.url || ''),
+        url_diff: String(row.chart?.url_diff || ''),
+        md5: String(row.chart?.md5 || ''),
+        sha256: String(row.chart?.sha256 || ''),
+        tableId: String(row.chart?.tableId || ''),
+        tableName: String(row.chart?.tableName || ''),
+        levelSymbol: String(row.chart?.levelSymbol || ''),
+        tableSourceUrl: String(row.chart?.tableSourceUrl || '')
+      },
+      song: compactSource(row.song),
+      sabun: compactSource(row.sabun),
+      fallbacks: (row.fallbacks || []).map((fallback) => ({ ...fallback })),
+      classification: { ...row.classification }
+    }));
+  }
+
+  function saveSearchCache(level, complete) {
+    return storage.saveSearchResult(
+      state.selectedTableId,
+      level,
+      cacheableRows(state.rows),
+      complete
+    );
+  }
+
+  function compatibleCachedRows(cached, charts) {
+    return Boolean(cached?.rows?.length <= charts.length && cached.rows.every((row, index) => (
+      row?.chart && chartIdentity(row.chart) === chartIdentity(charts[index])
+    )));
+  }
+
+  async function startLevelSearch(level, options = {}) {
     const normalizedLevel = String(level).trim();
     if (!state.table.length || !normalizedLevel) return;
 
@@ -133,13 +286,16 @@ async function start() {
     state.searchStopped = false;
     state.searchRunning = true;
     state.selectedLevel = normalizedLevel;
+    state.selectedLevels[state.selectedTableId] = normalizedLevel;
     state.selectedFilter = 'all';
     state.charts = state.table.filter((entry) => String(entry.level).trim() === normalizedLevel);
     state.rows = [];
+    if (options.force) storage.clearSearchResult(state.selectedTableId, normalizedLevel);
     savePrefs();
 
     ui.els.level.value = normalizedLevel;
-    ui.els.chartHeading.textContent = `sr${normalizedLevel} ${translator.t('table.chart')}`;
+    const levelLabel = formatLevel(state.selectedTable, normalizedLevel);
+    ui.els.chartHeading.textContent = `${levelLabel} ${translator.t('table.chart')}`;
     ui.els.body.innerHTML = '';
     ui.setProgress(0, state.charts.length);
     ui.setSearchRunning(true);
@@ -149,20 +305,42 @@ async function start() {
     if (!state.charts.length) {
       state.searchRunning = false;
       ui.setSearchRunning(false);
-      setStatus('status.noLevel', { level: normalizedLevel });
+      setStatus('status.noLevel', { levelLabel });
       return;
     }
 
-    setStatus('status.levelConfirmed', { level: normalizedLevel, count: state.charts.length });
+    const cached = options.force ? null : storage.loadSearchResult(state.selectedTableId, normalizedLevel);
+    if (cached && compatibleCachedRows(cached, state.charts)) {
+      state.rows = cached.rows;
+      ui.renderAllRows({ preserveSelection: false });
+      ui.setProgress(state.rows.length, state.charts.length);
+      if (cached.complete && state.rows.length === state.charts.length) {
+        state.searchRunning = false;
+        ui.setSearchRunning(false);
+        setStatus('status.searchCacheRestored', {
+          levelLabel,
+          count: state.rows.length,
+          time: new Date(cached.savedAt).toLocaleString(translator.locale())
+        });
+        return;
+      }
+      setStatus('status.searchCacheResumed', {
+        levelLabel,
+        current: state.rows.length,
+        total: state.charts.length
+      });
+    }
+
+    if (!state.rows.length) setStatus('status.levelConfirmed', { levelLabel, count: state.charts.length });
 
     const isCancelled = () => state.searchStopped || runId !== state.searchRunId || state.destroyed;
 
-    for (let index = 0; index < state.charts.length; index += 1) {
+    for (let index = state.rows.length; index < state.charts.length; index += 1) {
       if (isCancelled()) break;
       const chart = state.charts[index];
       ui.setProgress(index, state.charts.length);
       setStatus('status.searching', {
-        level: normalizedLevel,
+        levelLabel,
         current: index + 1,
         total: state.charts.length,
         title: chart.title
@@ -206,6 +384,9 @@ async function start() {
       }
 
       state.rows.push({ chart, song, sabun, fallbacks, classification });
+      if (state.rows.length % 5 === 0) {
+        saveSearchCache(normalizedLevel, false);
+      }
       ui.renderRow(state.rows.length - 1);
       ui.renderCounts();
       ui.setProgress(index + 1, state.charts.length);
@@ -214,14 +395,15 @@ async function start() {
     if (runId !== state.searchRunId || state.destroyed) return;
     state.searchRunning = false;
     ui.setSearchRunning(false);
+    saveSearchCache(normalizedLevel, !state.searchStopped && state.rows.length === state.charts.length);
     if (state.searchStopped) {
       setStatus('status.searchStopped', {
-        level: normalizedLevel,
+        levelLabel,
         count: state.rows.length
       });
     } else {
       setStatus('status.searchComplete', {
-        level: normalizedLevel,
+        levelLabel,
         count: state.charts.length
       });
     }
@@ -231,9 +413,10 @@ async function start() {
     state.searchStopped = true;
     state.searchRunId += 1;
     state.searchRunning = false;
+    saveSearchCache(state.selectedLevel, false);
     ui.setSearchRunning(false);
     setStatus('status.searchStopped', {
-      level: state.selectedLevel,
+      levelLabel: formatLevel(state.selectedTable, state.selectedLevel),
       count: state.rows.length
     });
   }
@@ -260,14 +443,18 @@ async function start() {
       id,
       title: result.chart.title,
       sourceName: itemDisplay(match.item),
-      level: result.chart.level
+      level: result.chart.level,
+      levelLabel: formatLevel(state.selectedTable, result.chart.level),
+      tableId: result.chart.tableId,
+      tableName: result.chart.tableName,
+      levelSymbol: result.chart.levelSymbol
     }]);
     if (enqueueResult.added > 0) await queueManager.process(1);
   }
 
   function exportSearchResults() {
     const headers = [
-      'index', 'level', 'title', 'subtitle', 'artist', 'sha256', 'match_status', 'download_status',
+      'index', 'table_id', 'table_name', 'level', 'level_label', 'title', 'subtitle', 'artist', 'sha256', 'match_status', 'download_status',
       'song_match', 'song_file_id', 'song_score', 'sabun_match', 'sabun_file_id', 'sabun_score',
       'fallbacks', 'table_url', 'table_diff_url'
     ];
@@ -285,7 +472,10 @@ async function start() {
 
       rows.push([
         index + 1,
+        result.chart.tableId,
+        result.chart.tableName,
         result.chart.level,
+        formatLevel(state.selectedTable, result.chart.level),
         result.chart.title,
         result.chart.subtitle || '',
         result.chart.artist || '',
@@ -305,21 +495,25 @@ async function start() {
     });
 
     const date = new Date().toISOString().slice(0, 10);
+    const safeLevel = formatLevel(state.selectedTable, state.selectedLevel).replace(/[^\p{L}\p{N}_+-]+/gu, '-');
     downloadTextFile(
       createCsv(rows),
-      `starlight_sr${state.selectedLevel}_live_results_${date}.csv`,
+      `${state.selectedTableId}_${safeLevel}_live_results_${date}.csv`,
       'text/csv;charset=utf-8'
     );
   }
 
   function exportHistory() {
     const rows = [[
-      'requested_at', 'level', 'type', 'title', 'source_name', 'file_id', 'file_name', 'status'
+      'requested_at', 'table_id', 'table_name', 'level', 'level_label', 'type', 'title', 'source_name', 'file_id', 'file_name', 'status'
     ]];
     for (const entry of history.list()) {
       rows.push([
         entry.requestedAt,
+        entry.tableId,
+        entry.tableName,
         entry.level,
+        entry.levelLabel,
         entry.type,
         entry.title,
         entry.sourceName,
@@ -341,6 +535,28 @@ async function start() {
     refreshStatus();
   }
 
+  async function chooseDownloadDirectory() {
+    if (typeof globalThis.showDirectoryPicker !== 'function') {
+      state.queueMessage = translator.t('download.folderUnsupported');
+      ui.renderQueue();
+      return;
+    }
+    try {
+      const handle = await globalThis.showDirectoryPicker({
+        id: 'bms-difficulty-table-downloader',
+        mode: 'readwrite'
+      });
+      state.downloadDirectoryHandle = handle;
+      state.queueMessage = translator.t('download.folderSelected', { name: handle.name });
+      ui.renderQueue();
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        state.queueMessage = translator.t('download.folderFailure', { error: error?.message || String(error) });
+        ui.renderQueue();
+      }
+    }
+  }
+
   function destroy() {
     if (state.destroyed) return;
     state.destroyed = true;
@@ -358,7 +574,16 @@ async function start() {
     translator,
     history,
     handlers: {
+      onTableChange: loadTable,
+      onLevelChange(level) {
+        state.selectedLevel = String(level);
+        state.selectedLevels[state.selectedTableId] = state.selectedLevel;
+        savePrefs();
+      },
       onSearchLevel: startLevelSearch,
+      onRefreshLevel(level) {
+        startLevelSearch(level, { force: true });
+      },
       onStopSearch: stopSearch,
       onClose: destroy,
       onCandidate: handleCandidate,
@@ -373,8 +598,18 @@ async function start() {
       },
       onExportSearch: exportSearchResults,
       onBatchSizeChange(value) {
-        state.batchSize = CONFIG.allowedBatchSizes.includes(value) ? value : CONFIG.defaultBatchSize;
+        state.batchSize = value === CONFIG.safeBatchValue
+          ? CONFIG.safeBatchValue
+          : CONFIG.allowedBatchSizes.includes(Number(value))
+            ? Number(value)
+            : CONFIG.defaultBatchSize;
         savePrefs();
+      },
+      onChooseDirectory: chooseDownloadDirectory,
+      onUseBrowserDownloads() {
+        state.downloadDirectoryHandle = null;
+        state.queueMessage = translator.t('download.browserSelected');
+        ui.renderQueue();
       },
       onRunQueue() {
         queueManager.process(state.batchSize);
@@ -401,6 +636,8 @@ async function start() {
     }
   });
 
+  ui.setTables(TABLE_CATALOG);
+
   globalThis.__STARLIGHT_DIFFICULTY_DOWNLOADER__ = { destroy, state };
 
   state.rateTimer = setInterval(() => {
@@ -409,44 +646,7 @@ async function start() {
     ui.renderQueue();
   }, 1000);
 
-  try {
-    const table = await api.fetchTable();
-    if (state.destroyed) return null;
-    state.table = table;
-
-    const counts = new Map();
-    for (const entry of table) {
-      const level = String(entry.level ?? '').trim();
-      if (!level) continue;
-      counts.set(level, (counts.get(level) || 0) + 1);
-    }
-    state.levelCounts = counts;
-    state.levels = [...counts.keys()].sort(levelSort);
-    if (!state.levels.length) throw new Error('No levels found in the official table.');
-    if (!state.levels.includes(state.selectedLevel)) {
-      state.selectedLevel = state.levels.includes(CONFIG.defaultLevel)
-        ? CONFIG.defaultLevel
-        : state.levels[0];
-    }
-
-    ui.setLevels(state.levels, counts);
-    savePrefs();
-
-    const restored = state.downloadQueue.length || history.size()
-      ? translator.t('status.tableRestoredSuffix', {
-        queue: state.downloadQueue.length,
-        history: history.size()
-      })
-      : '';
-    setStatus('status.tableLoaded', { level: state.selectedLevel, restored });
-    ui.renderQueue();
-    await startLevelSearch(state.selectedLevel);
-  } catch (error) {
-    console.error(error);
-    setStatus('status.failure', { error: error?.message || String(error) });
-    ui.els.loadLevel.disabled = true;
-    alert(`${translator.t('app.loadFailureTitle')}\n\n${error?.message || error}\n\n${translator.t('app.verifySongsPage')}`);
-  }
+  await loadTable(state.selectedTableId, { initial: true });
 
   return globalThis.__STARLIGHT_DIFFICULTY_DOWNLOADER__;
 }
