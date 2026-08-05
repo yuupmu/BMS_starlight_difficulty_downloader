@@ -58,6 +58,7 @@ function createStorage(storageLike) {
   function normalizeQueueItem(item) {
     if (!item || (item.type !== 'song' && item.type !== 'sabun') || item.id === undefined || item.id === null) return null;
     return {
+      providerId: String(item.providerId || CONFIG.defaultProviderId),
       type: item.type,
       id: String(item.id),
       title: String(item.title || item.id),
@@ -66,6 +67,8 @@ function createStorage(storageLike) {
       levelSymbol: String(item.levelSymbol || 'sr'),
       tableId: String(item.tableId || 'starlight'),
       tableName: String(item.tableName || 'Starlight'),
+      sha256: String(item.sha256 || ''),
+      md5: String(item.md5 || ''),
       sourceName: String(item.sourceName || ''),
       addedAt: item.addedAt || new Date().toISOString(),
       attempts: Number.isFinite(Number(item.attempts)) ? Number(item.attempts) : 0,
@@ -80,7 +83,7 @@ function createStorage(storageLike) {
     for (const rawItem of value) {
       const item = normalizeQueueItem(rawItem);
       if (!item) continue;
-      const key = `${item.type}:${item.id}`;
+      const key = `${item.providerId}:${item.type}:${item.id}`;
       if (!deduped.has(key)) deduped.set(key, item);
     }
     return [...deduped.values()];

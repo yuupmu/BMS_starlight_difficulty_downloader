@@ -25,7 +25,11 @@ GitHub README pages cannot safely execute a `javascript:` bookmark directly. Dra
 - An **Up to server allowance (auto)** batch mode in addition to fixed batch sizes.
 - Persistent queue, rate-limit reset time, preferences, and requested-file history.
 - Resumes from the first pending item after the page is closed or a request limit is reached.
-- Prevents duplicate requests by storing each successful request as `song:<file-id>` or `sabun:<file-id>`.
+- Bounded exponential retry for temporary network/5xx failures, plus a stop button that leaves the remaining queue intact.
+- Prevents duplicate requests by storing each successful request under its provider, source type, and file ID.
+- Scans one user-selected, extracted BMS root folder and compares chart files to table SHA-256/MD5 hashes.
+- Shows installed/missing filters and excludes installed charts from bulk selection and the pending queue.
+- Reuses unchanged file hashes on later scans through a browser-local IndexedDB inventory.
 - Download history window with **Download again**, record removal, and CSV export.
 - Migrates queue and preferences from the previous `starlight-level-downloader:*:v2` storage keys.
 - No runtime dependencies and no build dependencies.
@@ -73,6 +77,31 @@ docs/assets/starlight-difficulty-downloader.js
 
 The generated bundle should not be edited directly. Edit the files under `src/`, then rebuild.
 
+## Download-provider architecture
+
+The queue, retry, resume, and history logic is independent of the current content backend. A provider adapter supplies only the backend-specific search and download-preparation operations:
+
+```js
+const provider = {
+  id: 'example-provider',
+  capabilities: {
+    search: true,
+    downloadGrant: false,
+    corsFetch: false,
+    loginRequired: false,
+    bulkDownload: false
+  },
+  async search(sourceType, query) {
+    return [{ id: 'remote-id', title: 'title' }];
+  },
+  async prepare(item, requestOptions) {
+    return { downloadUrl: 'https://example.invalid/file.zip' };
+  }
+};
+```
+
+Register additional adapters through `createApi({ providers: [...] })`; the built-in BMS Library adapter remains registered. Every queued item carries a `providerId`, so identical remote IDs from different providers do not collide in history. Adapters should use published APIs or documented direct links; HTML-only event sites and CAPTCHA-protected archives should remain user-opened sources unless their operators explicitly allow automation.
+
 ## Project structure
 
 ```text
@@ -98,8 +127,10 @@ starlight-difficulty-downloader/
 │   ├── config.js                      # URLs, constants, fallback links
 │   ├── history.js                     # requested-file history and duplicate keys
 │   ├── i18n.js                        # ko / ja / en translations
+│   ├── inventory.js                   # local BMS folder scan, hashes, incremental index
 │   ├── main.js                        # bundle entry point
 │   ├── matcher.js                     # search queries, scoring, selections
+│   ├── providers.js                   # provider registry and BMS Library adapter
 │   ├── queue.js                       # sequential downloads and resume logic
 │   ├── storage.js                     # localStorage and v2 migration
 │   ├── styles.js                      # scoped overlay CSS
@@ -115,11 +146,27 @@ starlight-difficulty-downloader/
 
 The queue and history are stored in `localStorage` on the BMS Library origin.
 
-After the server returns a download URL, the tool triggers the browser download and records the source type and file ID. It then removes the item from the queue. If execution stops between those writes, the next run sees the history key and prunes the duplicate queue item automatically.
+After the server returns a download URL, the tool triggers the browser download and records the provider, source type, and file ID. It then removes the item from the queue. If execution stops between those writes, the next run sees the history key and prunes the duplicate queue item automatically.
 
 A chart with a separate chart patch can require two records: one Song package and one Sabun file. Partial progress is displayed as `1/2 requested`.
 
 Search results are also cached in `localStorage` per table and level. **Search** restores that cache; **Search again** clears it and starts fresh.
+
+## Detect charts already installed locally
+
+Choose **Scan BMS folder** and select the top-level folder that contains the extracted song folders. The scanner recursively reads only `.bms`, `.bme`, `.bml`, and `.pms` chart files. It computes SHA-256 and MD5 locally, compares them with the selected difficulty table, and never uploads file contents or paths.
+
+After a complete scan:
+
+- exact hash matches are marked **Installed**;
+- installed rows cannot be selected by the bulk checkbox flow;
+- matching entries already in the pending queue are removed;
+- **Not installed locally** and **Installed locally** filters become available;
+- CSV exports include the installation result and matched relative path.
+
+The first scan hashes every chart. Later scans reuse a cached hash only when the browser confirms that the same directory was selected and its relative path, size, and modification time are unchanged. The cache is stored in IndexedDB on the BMS Library origin. The user still selects the folder because the browser does not allow a bookmarklet to inspect arbitrary local files silently.
+
+Keep each song's existing directory structure. Flattening chart files can break their relative audio/image references. Scan an extracted library; ZIP, RAR, and 7z contents are not inspected.
 
 ## Save folder and automatic batches
 

@@ -47,7 +47,9 @@ test('selected files keep their difficulty table metadata', () => {
       level: '10',
       levelSymbol: 'sl',
       tableId: 'satellite',
-      tableName: 'Satellite'
+      tableName: 'Satellite',
+      sha256: 'abc123',
+      md5: 'def456'
     },
     song: { matches: [{ item: { id: 'song-1', name: 'song.zip' }, score: 150 }] },
     sabun: { matches: [] }
@@ -55,6 +57,8 @@ test('selected files keep their difficulty table metadata', () => {
   assert.equal(item.levelLabel, 'sl10');
   assert.equal(item.tableId, 'satellite');
   assert.equal(item.tableName, 'Satellite');
+  assert.equal(item.sha256, 'abc123');
+  assert.equal(item.md5, 'def456');
 });
 
 test('Starlight-only fallback links do not leak into other tables', () => {

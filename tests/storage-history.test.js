@@ -31,14 +31,18 @@ test('legacy v2 queue and preferences are migrated to v3', () => {
   assert.ok(backing.getItem(CONFIG.storage.queue));
 });
 
-test('history is keyed by source type and file id', () => {
+test('history is keyed by provider, source type, and file id', () => {
   const storage = createStorage(memoryStorage());
   const history = createHistoryStore({ storage, initialEntries: [] });
   history.markRequested({ type: 'song', id: '42', title: 'Song', level: '10' });
   assert.equal(history.has('song', '42'), true);
   assert.equal(history.has('sabun', '42'), false);
-  assert.equal(history.size(), 1);
+  history.markRequested({ providerId: 'archive-org', type: 'song', id: '42', title: 'Mirror', level: '10' });
+  assert.equal(history.has('song', '42', 'archive-org'), true);
+  assert.equal(history.size(), 2);
   history.remove('song', '42');
+  assert.equal(history.size(), 1);
+  history.remove('song', '42', 'archive-org');
   assert.equal(history.size(), 0);
 });
 
@@ -52,16 +56,21 @@ test('queue and history preserve difficulty table metadata', () => {
     levelLabel: 'sl10',
     levelSymbol: 'sl',
     tableId: 'satellite',
-    tableName: 'Satellite'
+    tableName: 'Satellite',
+    sha256: 'abc123',
+    md5: 'def456'
   }]);
   const [queued] = storage.loadQueue();
   assert.equal(queued.levelLabel, 'sl10');
   assert.equal(queued.tableId, 'satellite');
+  assert.equal(queued.sha256, 'abc123');
+  assert.equal(queued.md5, 'def456');
 
   const history = createHistoryStore({ storage, initialEntries: [] });
   history.markRequested(queued);
   assert.equal(history.latest().levelLabel, 'sl10');
   assert.equal(history.latest().tableName, 'Satellite');
+  assert.equal(history.latest().sha256, 'abc123');
 });
 
 test('search caches are isolated by table id and level', () => {

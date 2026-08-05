@@ -7,7 +7,8 @@ function normalizeEntry(entry) {
   if (!entry || (entry.type !== 'song' && entry.type !== 'sabun') || entry.id === undefined || entry.id === null) return null;
   const requestedAt = entry.requestedAt || entry.completedAt || entry.timestamp || new Date().toISOString();
   return {
-    key: fileKey(entry.type, entry.id),
+    key: fileKey(entry.type, entry.id, entry.providerId),
+    providerId: String(entry.providerId || CONFIG.defaultProviderId),
     type: entry.type,
     id: String(entry.id),
     title: String(entry.title || entry.id),
@@ -17,6 +18,8 @@ function normalizeEntry(entry) {
     levelSymbol: String(entry.levelSymbol || 'sr'),
     tableId: String(entry.tableId || 'starlight'),
     tableName: String(entry.tableName || 'Starlight'),
+    sha256: String(entry.sha256 || ''),
+    md5: String(entry.md5 || ''),
     requestedAt,
     fileName: String(entry.fileName || ''),
     status: 'requested'
@@ -54,12 +57,12 @@ function createHistoryStore(options) {
     });
   }
 
-  function has(type, id) {
-    return map.has(fileKey(type, id));
+  function has(type, id, providerId = CONFIG.defaultProviderId) {
+    return map.has(fileKey(type, id, providerId));
   }
 
-  function get(type, id) {
-    return map.get(fileKey(type, id)) || null;
+  function get(type, id, providerId = CONFIG.defaultProviderId) {
+    return map.get(fileKey(type, id, providerId)) || null;
   }
 
   function markRequested(item, payload = {}) {
@@ -74,8 +77,8 @@ function createHistoryStore(options) {
     return entry;
   }
 
-  function remove(type, id) {
-    const removed = map.delete(fileKey(type, id));
+  function remove(type, id, providerId = CONFIG.defaultProviderId) {
+    const removed = map.delete(fileKey(type, id, providerId));
     if (removed) persist();
     return removed;
   }

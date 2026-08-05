@@ -1,6 +1,6 @@
 'use strict';
 
-const VERSION = '1.0.0';
+const VERSION = '1.2.0';
 
 const CONFIG = Object.freeze({
   version: VERSION,
@@ -13,10 +13,16 @@ const CONFIG = Object.freeze({
   songGrantUrl: 'https://horie.synology.me:8443/api/v1/files/{id}/download-grants',
   sabunGrantUrl: 'https://horie.synology.me:8443/api/v1/sabuns/{id}/download-grants',
   downloadBaseUrl: 'https://horie.synology.me:8443',
+  defaultProviderId: 'bms-library',
   panelId: 'starlight-difficulty-downloader',
   loaderId: 'starlight-difficulty-downloader-loader',
   searchDelayMs: 650,
   downloadDelayMs: 5000,
+  downloadRetryMaxAttempts: 3,
+  downloadRetryBaseMs: 1500,
+  downloadRetryMaxMs: 30000,
+  hiddenFrameCleanupMs: 60000,
+  inventoryYieldEvery: 25,
   defaultBatchSize: 3,
   allowedBatchSizes: Object.freeze([1, 3, 5, 10]),
   safeBatchValue: 'safe',
@@ -25,6 +31,8 @@ const CONFIG = Object.freeze({
     queue: 'starlight-difficulty-downloader:queue:v3',
     history: 'starlight-difficulty-downloader:history:v3',
     searchResults: 'starlight-difficulty-downloader:search-results:v3',
+    inventoryDb: 'starlight-difficulty-downloader-inventory',
+    inventoryStore: 'folders',
     legacyPrefs: 'starlight-level-downloader:prefs:v2',
     legacyQueue: 'starlight-level-downloader:queue:v2'
   }),

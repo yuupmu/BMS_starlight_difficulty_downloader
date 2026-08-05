@@ -174,3 +174,52 @@ test('selected-folder mode writes the response before recording download history
   assert.deepEqual(writes, ['archive bytes', 'closed']);
   assert.equal(history.has('song', 'folder-1'), true);
 });
+
+test('transient grant failures use bounded backoff and keep queue state durable', async () => {
+  const originalDocument = global.document;
+  global.document = {
+    body: { appendChild() {} },
+    createElement() { return { style: {}, click() {}, remove() {} }; }
+  };
+  try {
+    const storage = createStorage(memoryStorage());
+    const history = createHistoryStore({ storage, initialEntries: [] });
+    const state = {
+      selectedLevel: '10', downloadQueue: [], downloadRunning: false,
+      batchSize: 1, blockedUntil: 0, rateInfo: null, queueMessage: ''
+    };
+    let calls = 0;
+    const delays = [];
+    const manager = createQueueManager({
+      state,
+      storage,
+      history,
+      api: {
+        async grant() {
+          calls += 1;
+          if (calls === 1) {
+            const error = new Error('temporary outage');
+            error.status = 503;
+            throw error;
+          }
+          return { downloadUrl: '/download/recovered.zip' };
+        }
+      },
+      translator: createTranslator('en'),
+      savePrefs() {},
+      sleepFn: async (ms) => { delays.push(ms); },
+      randomFn: () => 0.5,
+      config: { ...CONFIG, downloadDelayMs: 0, hiddenFrameCleanupMs: 0 }
+    });
+    manager.enqueue([{ type: 'song', id: 'retry-1', title: 'Retry example', level: '10' }]);
+
+    const result = await manager.process(1);
+    assert.equal(result.completed, 1);
+    assert.equal(calls, 2);
+    assert.deepEqual(delays, [CONFIG.downloadRetryBaseMs]);
+    assert.equal(state.downloadQueue.length, 0);
+    assert.equal(history.has('song', 'retry-1'), true);
+  } finally {
+    global.document = originalDocument;
+  }
+});

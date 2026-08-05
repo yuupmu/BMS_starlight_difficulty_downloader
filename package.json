@@ -1,6 +1,6 @@
 {
   "name": "starlight-difficulty-downloader",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "description": "A multilingual bookmarklet for finding and sequentially requesting BMS files from multiple difficulty tables.",
   "scripts": {

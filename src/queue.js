@@ -4,6 +4,25 @@ const { CONFIG } = require('./config');
 const { extractRateInfo, isRateLimitError } = require('./api');
 const { sleep, fileKey, formatLocalDate } = require('./utils');
 
+const TRANSIENT_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
+
+function isTransientDownloadError(error) {
+  if (isRateLimitError(error)) return false;
+  if (error?.name === 'AbortError') return false;
+  return !Number.isFinite(Number(error?.status)) || TRANSIENT_STATUSES.has(Number(error.status));
+}
+
+function retryDelayMs(error, attempt, config = CONFIG, random = Math.random) {
+  if (Number.isFinite(Number(error?.retryAfterMs))) {
+    return Math.min(config.downloadRetryMaxMs, Math.max(0, Number(error.retryAfterMs)));
+  }
+  const exponential = Math.min(
+    config.downloadRetryMaxMs,
+    config.downloadRetryBaseMs * (2 ** Math.max(0, attempt - 1))
+  );
+  return Math.round(exponential * (0.75 + random() * 0.5));
+}
+
 function createQueueManager(options) {
   const {
     state,
@@ -15,6 +34,8 @@ function createQueueManager(options) {
     onChange = () => {},
     config = CONFIG
   } = options;
+  const sleepFn = options.sleepFn || sleep;
+  const randomFn = options.randomFn || Math.random;
 
   function notify(reason) {
     onChange(reason);
@@ -60,22 +81,23 @@ function createQueueManager(options) {
 
   function pruneCompleted() {
     const before = state.downloadQueue.length;
-    state.downloadQueue = state.downloadQueue.filter((item) => !history.has(item.type, item.id));
+    state.downloadQueue = state.downloadQueue.filter((item) => !history.has(item.type, item.id, item.providerId));
     const removed = before - state.downloadQueue.length;
     if (removed > 0) saveQueue();
     return removed;
   }
 
   function enqueue(items) {
-    const existing = new Set(state.downloadQueue.map((item) => fileKey(item.type, item.id)));
+    const existing = new Set(state.downloadQueue.map((item) => fileKey(item.type, item.id, item.providerId)));
     let added = 0;
     let alreadyRequested = 0;
     let alreadyQueued = 0;
 
     for (const rawItem of items || []) {
       if (!rawItem?.id || (rawItem.type !== 'song' && rawItem.type !== 'sabun')) continue;
-      const key = fileKey(rawItem.type, rawItem.id);
-      if (history.has(rawItem.type, rawItem.id)) {
+      const providerId = String(rawItem.providerId || config.defaultProviderId);
+      const key = fileKey(rawItem.type, rawItem.id, providerId);
+      if (history.has(rawItem.type, rawItem.id, providerId)) {
         alreadyRequested += 1;
         continue;
       }
@@ -85,6 +107,7 @@ function createQueueManager(options) {
       }
       existing.add(key);
       state.downloadQueue.push({
+        providerId,
         type: rawItem.type,
         id: String(rawItem.id),
         title: String(rawItem.title || rawItem.id),
@@ -94,6 +117,8 @@ function createQueueManager(options) {
         levelSymbol: String(rawItem.levelSymbol || state.selectedTable?.symbol || 'sr'),
         tableId: String(rawItem.tableId || state.selectedTableId || 'starlight'),
         tableName: String(rawItem.tableName || state.selectedTable?.name || 'Starlight'),
+        sha256: String(rawItem.sha256 || ''),
+        md5: String(rawItem.md5 || ''),
         addedAt: new Date().toISOString(),
         attempts: 0,
         lastAttemptAt: null,
@@ -140,6 +165,8 @@ function createQueueManager(options) {
     document.body.appendChild(link);
     link.click();
     link.remove();
+    const cleanupTimer = setTimeout(() => frame.remove(), config.hiddenFrameCleanupMs);
+    cleanupTimer?.unref?.();
   }
 
   function safeFileName(value, fallback) {
@@ -237,11 +264,13 @@ function createQueueManager(options) {
     }
 
     state.downloadRunning = true;
+    state.downloadStopRequested = false;
     state.queueMessage = translator.t('queue.downloadStarting');
     notify('download-start');
 
     let completed = 0;
     let skipped = initiallyPruned;
+    let finalReason = '';
     const safeMode = maxItems === config.safeBatchValue;
     const requestedTarget = safeMode
       ? state.downloadQueue.length
@@ -251,88 +280,121 @@ function createQueueManager(options) {
       ? Math.min(requestedTarget, knownWindowRemaining)
       : requestedTarget;
 
-    while (state.downloadQueue.length && completed < target) {
-      const item = state.downloadQueue[0];
-      if (history.has(item.type, item.id)) {
-        state.downloadQueue.shift();
-        skipped += 1;
-        saveQueue();
-        notify('skip-history-duplicate');
-        continue;
-      }
-
-      state.queueMessage = translator.t('queue.processingItem', {
-        current: completed + 1,
-        target,
-        levelLabel: item.levelLabel || `sr${item.level}`,
-        title: item.title
-      });
-      item.attempts = Number(item.attempts || 0) + 1;
-      item.lastAttemptAt = new Date().toISOString();
-      item.lastError = '';
-      saveQueue();
-      notify('download-item-start');
-
-      try {
-        const payload = await api.grant(item.type, item.id);
-        applyRateInfo(payload, false);
-        await deliverDownload(payload, item);
-
-        // Record first, then remove from the queue. If execution is interrupted between
-        // these two writes, the next run prunes the remaining queue item by history key.
-        history.markRequested(item, payload);
-        state.downloadQueue.shift();
-        saveQueue();
-        completed += 1;
-        notify('download-item-requested');
-
-        if (state.blockedUntil > Date.now()) {
-          state.queueMessage = translator.t('queue.windowUsed', { time: formatTime(state.blockedUntil) });
-          break;
+    try {
+      while (state.downloadQueue.length && completed < target && !state.downloadStopRequested) {
+        const item = state.downloadQueue[0];
+        if (history.has(item.type, item.id, item.providerId)) {
+          state.downloadQueue.shift();
+          skipped += 1;
+          saveQueue();
+          notify('skip-history-duplicate');
+          continue;
         }
-      } catch (error) {
-        item.lastError = error?.message || String(error);
-        saveQueue();
 
-        if (isRateLimitError(error)) {
-          const info = applyRateInfo(error.payload, true);
-          const resetText = state.blockedUntil > Date.now()
-            ? formatTime(state.blockedUntil)
-            : translator.t('rate.nextReset');
-          const todaySuffix = info?.remainingToday === null || info?.remainingToday === undefined
-            ? ''
-            : translator.t('queue.limitTodaySuffix', { count: info.remainingToday });
-          state.queueMessage = translator.t('queue.limitReached', {
-            time: resetText,
-            today: todaySuffix
+        let attemptsThisRun = 0;
+        let itemComplete = false;
+        while (!itemComplete && !state.downloadStopRequested) {
+          attemptsThisRun += 1;
+          state.queueMessage = translator.t('queue.processingItem', {
+            current: completed + 1,
+            target,
+            levelLabel: item.levelLabel || `sr${item.level}`,
+            title: item.title
           });
-          notify('rate-limit');
-          break;
+          item.attempts = Number(item.attempts || 0) + 1;
+          item.lastAttemptAt = new Date().toISOString();
+          item.lastError = '';
+          saveQueue();
+          notify('download-item-start');
+
+          try {
+            const payload = await api.grant(item);
+            applyRateInfo(payload, false);
+            await deliverDownload(payload, item);
+
+            // Record first, then remove from the queue. If execution is interrupted between
+            // these two writes, the next run prunes the remaining queue item by history key.
+            history.markRequested(item, payload);
+            state.downloadQueue.shift();
+            saveQueue();
+            completed += 1;
+            itemComplete = true;
+            notify('download-item-requested');
+
+            if (state.blockedUntil > Date.now()) {
+              state.queueMessage = translator.t('queue.windowUsed', { time: formatTime(state.blockedUntil) });
+              finalReason = 'rate-limit';
+            }
+          } catch (error) {
+            item.lastError = error?.message || String(error);
+            saveQueue();
+
+            if (isRateLimitError(error)) {
+              const info = applyRateInfo(error.payload, true);
+              const resetText = state.blockedUntil > Date.now()
+                ? formatTime(state.blockedUntil)
+                : translator.t('rate.nextReset');
+              const todaySuffix = info?.remainingToday === null || info?.remainingToday === undefined
+                ? ''
+                : translator.t('queue.limitTodaySuffix', { count: info.remainingToday });
+              state.queueMessage = translator.t('queue.limitReached', { time: resetText, today: todaySuffix });
+              notify('rate-limit');
+              finalReason = 'rate-limit';
+              break;
+            }
+
+            if (isTransientDownloadError(error) && attemptsThisRun < config.downloadRetryMaxAttempts) {
+              const delay = retryDelayMs(error, attemptsThisRun, config, randomFn);
+              state.queueMessage = translator.t('queue.retrying', {
+                attempt: attemptsThisRun + 1,
+                max: config.downloadRetryMaxAttempts,
+                seconds: Math.ceil(delay / 1000),
+                error: item.lastError
+              });
+              notify('download-retry');
+              await sleepFn(delay);
+              continue;
+            }
+
+            state.queueMessage = translator.t('queue.currentFailure', { error: item.lastError });
+            notify('download-error');
+            finalReason = 'error';
+            break;
+          }
         }
 
-        state.queueMessage = translator.t('queue.currentFailure', { error: item.lastError });
-        notify('download-error');
-        break;
+        if (finalReason) break;
+        if (state.downloadQueue.length && completed < target && !state.downloadStopRequested) {
+          await sleepFn(config.downloadDelayMs);
+        }
       }
-
-      if (state.downloadQueue.length && completed < target) await sleep(config.downloadDelayMs);
+    } finally {
+      state.downloadRunning = false;
+      if (state.downloadStopRequested) {
+        state.queueMessage = translator.t('queue.stopped', { remaining: state.downloadQueue.length });
+      } else if (!finalReason && completed > 0) {
+        state.queueMessage = state.downloadQueue.length
+          ? translator.t('queue.batchComplete', { completed, remaining: state.downloadQueue.length })
+          : translator.t('queue.allComplete', { completed });
+      } else if (!finalReason && completed === 0 && skipped > 0 && !state.downloadQueue.length) {
+        state.queueMessage = translator.t('queue.skippedCompleted', { count: skipped });
+      }
+      saveQueue();
+      notify('download-finished');
     }
-
-    state.downloadRunning = false;
-    if (completed > 0 && state.blockedUntil <= Date.now()) {
-      state.queueMessage = state.downloadQueue.length
-        ? translator.t('queue.batchComplete', { completed, remaining: state.downloadQueue.length })
-        : translator.t('queue.allComplete', { completed });
-    } else if (completed === 0 && skipped > 0 && !state.downloadQueue.length) {
-      state.queueMessage = translator.t('queue.skippedCompleted', { count: skipped });
-    }
-    saveQueue();
-    notify('download-finished');
     return { completed, skipped };
   }
 
+  function stop() {
+    if (!state.downloadRunning) return false;
+    state.downloadStopRequested = true;
+    state.queueMessage = translator.t('queue.stopRequested');
+    notify('download-stop-requested');
+    return true;
+  }
+
   function removeHistoryAndRequeue(entry) {
-    history.remove(entry.type, entry.id);
+    history.remove(entry.type, entry.id, entry.providerId);
     const result = enqueue([entry]);
     state.queueMessage = translator.t('history.retryQueued');
     notify('history-retry');
@@ -342,6 +404,7 @@ function createQueueManager(options) {
   return {
     enqueue,
     clear,
+    stop,
     process,
     pruneCompleted,
     expireBlockIfNeeded,
@@ -351,4 +414,4 @@ function createQueueManager(options) {
   };
 }
 
-module.exports = { createQueueManager };
+module.exports = { createQueueManager, isTransientDownloadError, retryDelayMs };
