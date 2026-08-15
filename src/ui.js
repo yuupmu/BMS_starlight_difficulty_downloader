@@ -6,13 +6,21 @@ const { formatLevel } = require('./tables');
 const {
   escapeHtml,
   formatLocalDate,
-  formatRemaining
+  formatRemaining,
+  fileKey
 } = require('./utils');
 const {
   itemDisplay,
   downloadCoverage,
   selectionItemsForResult
 } = require('./matcher');
+const { chartInstallation } = require('./inventory');
+const {
+  isFilterStateEmpty,
+  isFilterActive,
+  toggleFilter,
+  matchesFilters
+} = require('./filters');
 
 function createUi(options) {
   const {
@@ -45,9 +53,13 @@ function createUi(options) {
       <label class="sld-inline"><strong id="sld-level-label"></strong><select id="sld-level" disabled><option></option></select></label>
       <button id="sld-load-level" class="sld-primary" disabled></button>
       <button id="sld-refresh-level" disabled></button>
-      <button id="sld-select-matched"></button>
-      <button id="sld-clear-selection"></button>
-      <button id="sld-queue-selected" class="sld-primary"></button>
+      <button id="sld-scan-library"></button>
+      <input id="sld-library-files" type="file" webkitdirectory multiple hidden>
+      <span class="sld-selection-actions">
+        <button id="sld-select-matched"></button>
+        <button id="sld-clear-selection"></button>
+        <button id="sld-queue-selected" class="sld-primary"></button>
+      </span>
       <button id="sld-export"></button>
       <button id="sld-stop" class="sld-danger"></button>
       <span class="grow"></span>
@@ -59,14 +71,23 @@ function createUi(options) {
       <progress id="sld-progress" max="1" value="0"></progress>
       <strong id="sld-status"></strong>
       <span id="sld-counts" class="sld-muted"></span>
+      <span id="sld-library-status" class="sld-library-status sld-muted"></span>
       <span class="grow"></span>
       <div class="sld-filters">
         <button class="sld-filter sld-active" data-filter="all"></button>
-        <button class="sld-filter" data-filter="pending"></button>
-        <button class="sld-filter" data-filter="matched"></button>
-        <button class="sld-filter" data-filter="review"></button>
-        <button class="sld-filter" data-filter="missing"></button>
-        <button class="sld-filter" data-filter="requested"></button>
+        <span class="sld-filter-group" data-filter-group="download">
+          <button class="sld-filter" data-filter="pending"></button>
+          <button class="sld-filter" data-filter="requested"></button>
+        </span>
+        <span class="sld-filter-group" data-filter-group="installation">
+          <button class="sld-filter" data-filter="uninstalled"></button>
+          <button class="sld-filter" data-filter="installed"></button>
+        </span>
+        <span class="sld-filter-group" data-filter-group="match">
+          <button class="sld-filter" data-filter="matched"></button>
+          <button class="sld-filter" data-filter="review"></button>
+          <button class="sld-filter" data-filter="missing"></button>
+        </span>
       </div>
     </div>
     <div class="sld-queuebar">
@@ -77,6 +98,10 @@ function createUi(options) {
       <button id="sld-download-folder"></button>
       <button id="sld-browser-downloads" hidden></button>
       <button id="sld-run-queue" class="sld-primary"></button>
+      <button id="sld-confirm-browser-download" class="sld-primary" hidden></button>
+      <button id="sld-retry-browser-download" hidden></button>
+      <button id="sld-new-browser-grant" hidden></button>
+      <button id="sld-stop-queue" class="sld-danger"></button>
       <button id="sld-clear-queue"></button>
       <span id="sld-queue-message" class="sld-queue-message sld-muted"></span>
       <span class="grow"></span>
@@ -94,6 +119,7 @@ function createUi(options) {
           <th id="sld-th-sabun"></th>
           <th id="sld-th-fallback"></th>
           <th id="sld-th-match"></th>
+          <th id="sld-th-local"></th>
           <th id="sld-th-download"></th>
         </tr></thead>
         <tbody id="sld-body"></tbody>
@@ -126,6 +152,8 @@ function createUi(options) {
     level: get('#sld-level'),
     loadLevel: get('#sld-load-level'),
     refreshLevel: get('#sld-refresh-level'),
+    scanLibrary: get('#sld-scan-library'),
+    libraryFiles: get('#sld-library-files'),
     selectMatched: get('#sld-select-matched'),
     clearSelection: get('#sld-clear-selection'),
     queueSelected: get('#sld-queue-selected'),
@@ -138,6 +166,7 @@ function createUi(options) {
     progress: get('#sld-progress'),
     status: get('#sld-status'),
     counts: get('#sld-counts'),
+    libraryStatus: get('#sld-library-status'),
     body: get('#sld-body'),
     chartHeading: get('#sld-chart-heading'),
     queueTitle: get('#sld-queue-title'),
@@ -149,6 +178,10 @@ function createUi(options) {
     browserDownloads: get('#sld-browser-downloads'),
     batchSuffix: get('#sld-batch-suffix'),
     runQueue: get('#sld-run-queue'),
+    confirmBrowserDownload: get('#sld-confirm-browser-download'),
+    retryBrowserDownload: get('#sld-retry-browser-download'),
+    newBrowserGrant: get('#sld-new-browser-grant'),
+    stopQueue: get('#sld-stop-queue'),
     clearQueue: get('#sld-clear-queue'),
     queueMessage: get('#sld-queue-message'),
     lastRequested: get('#sld-last-requested'),
@@ -170,6 +203,7 @@ function createUi(options) {
       sabun: get('#sld-th-sabun'),
       fallback: get('#sld-th-fallback'),
       match: get('#sld-th-match'),
+      local: get('#sld-th-local'),
       download: get('#sld-th-download')
     }
   };
@@ -185,11 +219,14 @@ function createUi(options) {
   }
 
   function rowMatchesFilter(result) {
-    if (state.selectedFilter === 'all') return true;
+    if (isFilterStateEmpty(state.selectedFilters)) return true;
+    const installation = chartInstallation(result.chart, state.libraryInventory);
     const coverage = downloadCoverage(result, history);
-    if (state.selectedFilter === 'pending') return !coverage.all;
-    if (state.selectedFilter === 'requested') return coverage.all;
-    return result.classification?.key === state.selectedFilter;
+    return matchesFilters(state.selectedFilters, {
+      download: coverage.all ? 'requested' : 'pending',
+      installation: installation.status === 'installed' ? 'installed' : 'uninstalled',
+      match: result.classification?.key || 'missing'
+    });
   }
 
   function checkedRowIndexes() {
@@ -208,7 +245,7 @@ function createUi(options) {
       ? translator.t('table.requestedTooltip')
       : translator.t('table.candidateTooltip', { query: match.query, score: match.score });
     const statusSuffix = requested ? ` · ✓ ${translator.t('download.candidateRequested')}` : '';
-    return `<button class="sld-matchbtn${requested ? ' sld-requested' : ''}" data-download-type="${type}" data-file-id="${escapeHtml(match.item.id)}" data-row-index="${rowIndex}" title="${escapeHtml(title)}" ${requested ? 'disabled' : ''}>${escapeHtml(name)} <span class="sld-muted">(${match.score})${escapeHtml(statusSuffix)}</span></button>`;
+    return `<button class="sld-matchbtn${requested ? ' sld-requested' : ''}" data-download-type="${type}" data-file-id="${escapeHtml(match.item.id)}" data-row-index="${rowIndex}" title="${escapeHtml(title)}">${escapeHtml(name)} <span class="sld-muted">(${match.score})${escapeHtml(statusSuffix)}</span></button>`;
   }
 
   function downloadStatusHtml(result) {
@@ -219,14 +256,34 @@ function createUi(options) {
     return `<span class="sld-muted">${escapeHtml(translator.t('download.none'))}</span>`;
   }
 
+  function installationStatusHtml(chart) {
+    const installation = chartInstallation(chart, state.libraryInventory);
+    if (installation.status === 'installed') {
+      const path = installation.entry?.path || '';
+      return `<span class="sld-pill installed" title="${escapeHtml(path)}">${escapeHtml(translator.t('inventory.installed'))}</span>${path ? `<div class="sld-local-path" title="${escapeHtml(path)}">${escapeHtml(path)}</div>` : ''}`;
+    }
+    if (installation.status === 'uninstalled') {
+      return `<span class="sld-pill bad">${escapeHtml(translator.t('inventory.uninstalled'))}</span>`;
+    }
+    if (installation.status === 'unknown') {
+      return `<span class="sld-pill warn">${escapeHtml(translator.t('inventory.unknown'))}</span>`;
+    }
+    return `<span class="sld-muted">${escapeHtml(translator.t('inventory.notScanned'))}</span>`;
+  }
+
   function renderRow(index, checked = false) {
     const result = state.rows[index];
     if (!result) return;
     const chart = result.chart;
     const tr = document.createElement('tr');
     const coverage = downloadCoverage(result, history);
+    const installation = chartInstallation(chart, state.libraryInventory);
     const selections = selectionItemsForResult(result);
-    const selectable = Boolean(selections.length && !coverage.all && result.classification?.key !== 'missing');
+    const selectable = Boolean(
+      selections.length
+      && installation.status !== 'installed'
+      && result.classification?.key !== 'missing'
+    );
     tr.dataset.rowIndex = String(index);
     tr.dataset.status = result.classification?.key || 'missing';
     tr.dataset.requested = coverage.all ? 'true' : 'false';
@@ -252,6 +309,7 @@ function createUi(options) {
       <td>${sabunButtons || `<span class="sld-muted">${escapeHtml(translator.t('table.noResults'))}</span>`}</td>
       <td>${fallbacks || `<span class="sld-muted">${escapeHtml(translator.t('table.none'))}</span>`}</td>
       <td><span class="sld-pill ${escapeHtml(result.classification?.className || 'bad')}">${escapeHtml(translator.t(matchLabelKey))}</span>${errors ? `<div class="sld-error">${escapeHtml(errors)}</div>` : ''}</td>
+      <td>${installationStatusHtml(chart)}</td>
       <td>${downloadStatusHtml(result)}</td>
     `;
     els.body.appendChild(tr);
@@ -267,10 +325,11 @@ function createUi(options) {
   }
 
   function renderCounts() {
-    const stats = { matched: 0, review: 0, missing: 0, requested: 0 };
+    const stats = { matched: 0, review: 0, missing: 0, requested: 0, installed: 0 };
     for (const row of state.rows) {
       stats[row.classification?.key || 'missing'] += 1;
       if (downloadCoverage(row, history).all) stats.requested += 1;
+      if (chartInstallation(row.chart, state.libraryInventory).status === 'installed') stats.installed += 1;
     }
     els.counts.textContent = translator.t('status.counts', {
       levelLabel: formatLevel(state.selectedTable, state.selectedLevel),
@@ -278,14 +337,32 @@ function createUi(options) {
       matched: stats.matched,
       review: stats.review,
       missing: stats.missing,
-      requested: stats.requested
+      requested: stats.requested,
+      installed: stats.installed
     });
   }
 
   function refreshFilterButtons() {
     panel.querySelectorAll('.sld-filter').forEach((button) => {
-      button.classList.toggle('sld-active', button.dataset.filter === state.selectedFilter);
+      const active = isFilterActive(state.selectedFilters, button.dataset.filter);
+      button.classList.toggle('sld-active', active);
+      button.setAttribute('aria-pressed', String(active));
+      if (['installed', 'uninstalled'].includes(button.dataset.filter)) {
+        button.disabled = !state.libraryInventory;
+      }
     });
+  }
+
+  function renderLibraryStatus() {
+    els.libraryStatus.textContent = state.libraryScanMessage || translator.t('inventory.notScannedSummary');
+    els.scanLibrary.textContent = state.libraryScanRunning
+      ? translator.t('button.stopLibraryScan')
+      : state.libraryInventory
+        ? translator.t('button.rescanLibrary')
+        : translator.t('button.scanLibrary');
+    els.scanLibrary.classList.toggle('sld-danger', state.libraryScanRunning);
+    els.scanLibrary.disabled = state.downloadRunning && !state.libraryScanRunning;
+    refreshFilterButtons();
   }
 
   function refreshFilter() {
@@ -319,8 +396,14 @@ function createUi(options) {
     els.queueCount.textContent = translator.t('queue.pendingCount', { count: state.downloadQueue.length });
     els.historyCount.textContent = translator.t('queue.historyCount', { count: history.size() });
     const nextItem = state.downloadQueue[0];
-    const defaultQueueMessage = nextItem
-      ? `${translator.t('queue.saved')} ${translator.t('queue.nextItem', { levelLabel: nextItem.levelLabel || `sr${nextItem.level}`, title: nextItem.title })}`
+    const browserPending = nextItem?.deliveryStatus === 'browser-pending';
+    const defaultQueueMessage = browserPending
+      ? translator.t('queue.browserConfirmationRequired', {
+        levelLabel: nextItem.levelLabel || `sr${nextItem.level}`,
+        title: nextItem.title
+      })
+      : nextItem
+        ? `${translator.t('queue.saved')} ${translator.t('queue.nextItem', { levelLabel: nextItem.levelLabel || `sr${nextItem.level}`, title: nextItem.title })}`
       : translator.t('queue.empty');
     els.queueMessage.textContent = state.queueMessage || defaultQueueMessage;
 
@@ -331,16 +414,37 @@ function createUi(options) {
     els.lastRequested.title = latest?.sourceName || latest?.title || '';
 
     const blocked = state.blockedUntil > Date.now();
-    els.runQueue.disabled = state.downloadRunning || !state.downloadQueue.length || blocked;
+    const reusableGrant = Boolean(nextItem
+      && state.reusableGrant?.key === fileKey(nextItem.type, nextItem.id, nextItem.providerId));
+    els.runQueue.hidden = browserPending;
+    els.runQueue.disabled = state.downloadRunning
+      || state.libraryScanRunning
+      || !state.downloadQueue.length
+      || (blocked && !reusableGrant)
+      || browserPending;
+    els.confirmBrowserDownload.hidden = !browserPending;
+    els.retryBrowserDownload.hidden = !browserPending;
+    els.newBrowserGrant.hidden = !browserPending;
+    els.confirmBrowserDownload.disabled = state.downloadRunning;
+    els.retryBrowserDownload.disabled = state.downloadRunning || !state.browserPendingDownload;
+    els.newBrowserGrant.disabled = state.downloadRunning || blocked;
+    els.stopQueue.disabled = !state.downloadRunning;
     els.clearQueue.disabled = state.downloadRunning || !state.downloadQueue.length;
-    els.batchSize.disabled = state.downloadRunning;
+    els.batchSize.disabled = state.downloadRunning || !state.downloadDirectoryHandle;
+    els.batchSize.title = state.downloadDirectoryHandle ? '' : translator.t('queue.browserManualMode');
     els.downloadFolder.disabled = state.downloadRunning;
     els.downloadFolder.textContent = state.downloadDirectoryHandle
       ? translator.t('button.changeFolder', { name: state.downloadDirectoryHandle.name })
       : translator.t('button.chooseFolder');
     els.browserDownloads.hidden = !state.downloadDirectoryHandle;
     els.browserDownloads.disabled = state.downloadRunning;
+    els.confirmBrowserDownload.textContent = translator.t('button.confirmBrowserDownload');
+    els.retryBrowserDownload.textContent = state.downloadDirectoryHandle
+      ? translator.t('button.retrySameLinkToFolder')
+      : translator.t('button.retrySameLink');
+    els.newBrowserGrant.textContent = translator.t('button.requestNewLink');
     if (state.downloadRunning) els.runQueue.textContent = translator.t('button.processing');
+    else if (reusableGrant) els.runQueue.textContent = translator.t('button.retrySameLinkToFolder');
     else if (blocked) els.runQueue.textContent = translator.t('button.resumeAfterLimit');
     else els.runQueue.textContent = translator.t('button.runQueue');
     renderRateStatus();
@@ -348,6 +452,11 @@ function createUi(options) {
 
   function renderHistory() {
     const entries = history.list();
+    const historyStatusKeys = {
+      saved: 'history.saved',
+      'browser-confirmed': 'history.browserConfirmed',
+      requested: 'history.requested'
+    };
     els.historySummary.textContent = translator.t('history.summary', { count: entries.length });
     els.clearHistory.disabled = entries.length === 0;
     els.exportHistory.disabled = entries.length === 0;
@@ -364,13 +473,14 @@ function createUi(options) {
         <td>${escapeHtml(translator.t(entry.type === 'sabun' ? 'history.sabun' : 'history.song'))}</td>
         <td><div class="sld-title">${escapeHtml(entry.title)}</div>${entry.sourceName ? `<div class="sld-muted">${escapeHtml(entry.sourceName)}</div>` : ''}</td>
         <td><span class="sld-id">${escapeHtml(entry.id)}</span></td>
-        <td><div class="sld-history-actions"><button data-history-action="retry" data-history-type="${entry.type}" data-history-id="${escapeHtml(entry.id)}">${escapeHtml(translator.t('button.retry'))}</button><button data-history-action="remove" data-history-type="${entry.type}" data-history-id="${escapeHtml(entry.id)}">${escapeHtml(translator.t('button.removeRecord'))}</button></div></td>
+        <td>${escapeHtml(translator.t(historyStatusKeys[entry.status] || 'history.requested'))}</td>
+        <td><div class="sld-history-actions"><button data-history-action="retry" data-history-provider="${escapeHtml(entry.providerId)}" data-history-type="${entry.type}" data-history-id="${escapeHtml(entry.id)}">${escapeHtml(translator.t('button.retry'))}</button><button data-history-action="remove" data-history-provider="${escapeHtml(entry.providerId)}" data-history-type="${entry.type}" data-history-id="${escapeHtml(entry.id)}">${escapeHtml(translator.t('button.removeRecord'))}</button></div></td>
       </tr>
     `).join('');
 
     els.historyBody.innerHTML = `
       <table>
-        <thead><tr><th>${escapeHtml(translator.t('history.time'))}</th><th>${escapeHtml(translator.t('history.level'))}</th><th>${escapeHtml(translator.t('history.type'))}</th><th>${escapeHtml(translator.t('history.titleColumn'))}</th><th>${escapeHtml(translator.t('history.id'))}</th><th>${escapeHtml(translator.t('history.actions'))}</th></tr></thead>
+        <thead><tr><th>${escapeHtml(translator.t('history.time'))}</th><th>${escapeHtml(translator.t('history.level'))}</th><th>${escapeHtml(translator.t('history.type'))}</th><th>${escapeHtml(translator.t('history.titleColumn'))}</th><th>${escapeHtml(translator.t('history.id'))}</th><th>${escapeHtml(translator.t('history.status'))}</th><th>${escapeHtml(translator.t('history.actions'))}</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
@@ -393,6 +503,7 @@ function createUi(options) {
       levelLabel: formatLevel(state.selectedTable, els.level.value || state.selectedLevel)
     });
     els.refreshLevel.textContent = translator.t('button.refreshSearch');
+    renderLibraryStatus();
     els.selectMatched.textContent = translator.t('button.selectVisible');
     els.clearSelection.textContent = translator.t('button.clearSelection');
     els.queueSelected.textContent = translator.t('button.queueSelected');
@@ -403,7 +514,7 @@ function createUi(options) {
     els.close.textContent = translator.t('button.close');
     els.language.value = translator.language;
 
-    const filterKeys = { all: 'filter.all', pending: 'filter.pending', matched: 'filter.matched', review: 'filter.review', missing: 'filter.missing', requested: 'filter.requested' };
+    const filterKeys = { all: 'filter.all', pending: 'filter.pending', uninstalled: 'filter.uninstalled', installed: 'filter.installed', matched: 'filter.matched', review: 'filter.review', missing: 'filter.missing', requested: 'filter.requested' };
     panel.querySelectorAll('.sld-filter').forEach((button) => {
       button.textContent = translator.t(filterKeys[button.dataset.filter]);
     });
@@ -413,6 +524,7 @@ function createUi(options) {
     els.batchSuffix.textContent = translator.t('queue.batchSuffix');
     els.batchSize.querySelector(`[value="${config.safeBatchValue}"]`).textContent = translator.t('queue.safeBatch');
     els.browserDownloads.textContent = translator.t('button.useBrowserDownloads');
+    els.stopQueue.textContent = translator.t('button.stopQueue');
     els.clearQueue.textContent = translator.t('button.clearQueue');
 
     els.tableHeadings.select.textContent = translator.t('table.select');
@@ -423,6 +535,7 @@ function createUi(options) {
     els.tableHeadings.sabun.textContent = translator.t('table.sabunResults');
     els.tableHeadings.fallback.textContent = translator.t('table.fallbacks');
     els.tableHeadings.match.textContent = translator.t('table.matchStatus');
+    els.tableHeadings.local.textContent = translator.t('table.localStatus');
     els.tableHeadings.download.textContent = translator.t('table.downloadStatus');
     els.footer.textContent = translator.t('footer.notice');
 
@@ -499,12 +612,17 @@ function createUi(options) {
     return [...checkedRowIndexes()];
   }
 
+  function openLibraryFilePicker() {
+    els.libraryFiles.value = '';
+    els.libraryFiles.click();
+  }
+
   panel.addEventListener('click', (event) => {
     const filter = event.target.closest('.sld-filter');
     if (filter) {
-      state.selectedFilter = filter.dataset.filter;
+      state.selectedFilters = toggleFilter(state.selectedFilters, filter.dataset.filter);
       refreshFilter();
-      handlers.onFilterChange?.(state.selectedFilter);
+      handlers.onFilterChange?.({ ...state.selectedFilters });
       return;
     }
 
@@ -520,6 +638,8 @@ function createUi(options) {
 
   els.loadLevel.addEventListener('click', () => handlers.onSearchLevel?.(els.level.value));
   els.refreshLevel.addEventListener('click', () => handlers.onRefreshLevel?.(els.level.value));
+  els.scanLibrary.addEventListener('click', () => handlers.onScanLibrary?.());
+  els.libraryFiles.addEventListener('change', () => handlers.onLibraryFiles?.(els.libraryFiles.files));
   els.table.addEventListener('change', () => handlers.onTableChange?.(els.table.value));
   els.level.addEventListener('change', () => {
     state.selectedLevel = els.level.value;
@@ -538,6 +658,12 @@ function createUi(options) {
   els.downloadFolder.addEventListener('click', () => handlers.onChooseDirectory?.());
   els.browserDownloads.addEventListener('click', () => handlers.onUseBrowserDownloads?.());
   els.runQueue.addEventListener('click', () => handlers.onRunQueue?.());
+  els.confirmBrowserDownload.addEventListener('click', () => handlers.onConfirmBrowserDownload?.());
+  els.retryBrowserDownload.addEventListener('click', () => handlers.onRetryBrowserDownload?.());
+  els.newBrowserGrant.addEventListener('click', () => {
+    if (confirm(translator.t('confirm.requestNewGrant'))) handlers.onRequestNewBrowserGrant?.();
+  });
+  els.stopQueue.addEventListener('click', () => handlers.onStopQueue?.());
   els.clearQueue.addEventListener('click', () => {
     if (!state.downloadQueue.length) return;
     if (confirm(translator.t('confirm.clearQueue', { count: state.downloadQueue.length }))) handlers.onClearQueue?.();
@@ -556,7 +682,7 @@ function createUi(options) {
   els.historyBody.addEventListener('click', (event) => {
     const button = event.target.closest('[data-history-action]');
     if (!button) return;
-    const entry = history.get(button.dataset.historyType, button.dataset.historyId);
+    const entry = history.get(button.dataset.historyType, button.dataset.historyId, button.dataset.historyProvider);
     if (entry) handlers.onHistoryAction?.(button.dataset.historyAction, entry);
   });
 
@@ -578,11 +704,13 @@ function createUi(options) {
     renderAllRows,
     renderCounts,
     renderQueue,
+    renderLibraryStatus,
     renderHistory,
     refreshFilter,
     updateTranslations,
     openHistory,
     closeHistory,
+    openLibraryFilePicker,
     selectedRowIndexes,
     destroy() {
       panel.remove();

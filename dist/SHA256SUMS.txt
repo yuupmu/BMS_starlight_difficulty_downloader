@@ -1,1 +1,1 @@
-b1d660f3e820ca0adfbb505b8811d7e8f1951bdc8a62139a16b9930b16072d6f  starlight-difficulty-downloader.js
+a1d45b87d2cc1466612df5aaee209f56125ce2dfb71d6ea685d27ebf5b12b959  starlight-difficulty-downloader.js

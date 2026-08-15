@@ -69,8 +69,8 @@ function levelSort(a, b) {
   return String(a).localeCompare(String(b), undefined, { numeric: true });
 }
 
-function fileKey(type, id) {
-  return `${String(type)}:${String(id)}`;
+function fileKey(type, id, providerId = 'bms-library') {
+  return `${String(providerId)}:${String(type)}:${String(id)}`;
 }
 
 function formatLocalDate(value, locale, unknownText) {

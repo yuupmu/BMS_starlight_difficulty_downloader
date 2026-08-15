@@ -1,15 +1,24 @@
 'use strict';
 
 const { CONFIG } = require('./config');
-const { normalize } = require('./utils');
+const { createProviderRegistry, createBmsLibraryProvider } = require('./providers');
 
 class ApiError extends Error {
-  constructor(message, status, payload) {
+  constructor(message, status, payload, details = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.payload = payload || {};
+    this.retryAfterMs = Number.isFinite(details.retryAfterMs) ? details.retryAfterMs : null;
   }
+}
+
+function parseRetryAfter(value, now = Date.now()) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? Math.max(0, at - now) : null;
 }
 
 function extractRateInfo(payload) {
@@ -31,17 +40,25 @@ function isRateLimitError(error) {
 function createApi(options = {}) {
   const fetchFn = options.fetchFn || fetch.bind(globalThis);
   const config = options.config || CONFIG;
-  const queryCache = new Map();
 
-  async function fetchJson(url, requestOptions = {}) {
+  async function requestJson(url, requestOptions = {}) {
     const response = await fetchFn(url, { credentials: 'include', ...requestOptions });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const serverMessage = typeof payload.error === 'string' ? payload.error : '';
       const message = serverMessage || `${response.status} ${response.statusText}`;
-      throw new ApiError(message, response.status, payload);
+      const retryAfterMs = parseRetryAfter(response.headers?.get?.('retry-after'));
+      if (response.status === 429 && retryAfterMs !== null && !payload.windowResetsAt) {
+        payload.remainingInWindow = 0;
+        payload.windowResetsAt = new Date(Date.now() + retryAfterMs).toISOString();
+      }
+      throw new ApiError(message, response.status, payload, { retryAfterMs });
     }
-    return payload;
+    return { payload, response };
+  }
+
+  async function fetchJson(url, requestOptions = {}) {
+    return (await requestJson(url, requestOptions)).payload;
   }
 
   async function fetchTable(table) {
@@ -53,33 +70,18 @@ function createApi(options = {}) {
     return rows;
   }
 
-  async function search(sourceType, query) {
-    const endpoint = sourceType === 'sabun' ? config.sabunsApi : config.songsApi;
-    const cacheKey = `${sourceType}|${normalize(query)}`;
-    if (queryCache.has(cacheKey)) return queryCache.get(cacheKey);
+  const builtIn = createBmsLibraryProvider({ requestJson, config });
+  const registry = createProviderRegistry([builtIn, ...(options.providers || [])], config.defaultProviderId);
 
-    const url = new URL(endpoint);
-    url.searchParams.set('limit', String(config.searchResultLimit));
-    url.searchParams.set('offset', '0');
-    url.searchParams.set('q', query);
-
-    const payload = await fetchJson(url.toString());
-    const items = Array.isArray(payload.items) ? payload.items
-      : Array.isArray(payload.files) ? payload.files
-        : Array.isArray(payload) ? payload
-          : [];
-    queryCache.set(cacheKey, items);
-    return items;
+  async function search(sourceType, query, providerId = registry.defaultProviderId) {
+    return registry.get(providerId).search(sourceType, query);
   }
 
-  async function grant(type, id) {
-    const template = type === 'sabun' ? config.sabunGrantUrl : config.songGrantUrl;
-    const url = template.replace('{id}', encodeURIComponent(id));
-    const payload = await fetchJson(url, { method: 'POST' });
-    if (!payload.downloadUrl) {
-      throw new ApiError('The server did not return a download URL.', 500, payload);
-    }
-    return payload;
+  async function grant(typeOrItem, id, requestOptions = {}) {
+    const item = typeof typeOrItem === 'object'
+      ? typeOrItem
+      : { type: typeOrItem, id, providerId: registry.defaultProviderId };
+    return registry.get(item.providerId).prepare(item, requestOptions);
   }
 
   return {
@@ -87,8 +89,9 @@ function createApi(options = {}) {
     fetchTable,
     search,
     grant,
+    providers: registry,
     clearSearchCache() {
-      queryCache.clear();
+      for (const provider of registry.list()) provider.clearSearchCache?.();
     }
   };
 }
@@ -97,5 +100,6 @@ module.exports = {
   ApiError,
   extractRateInfo,
   isRateLimitError,
+  parseRetryAfter,
   createApi
 };

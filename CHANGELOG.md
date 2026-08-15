@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Browser downloads now stay at the front of the queue until the user confirms that the file was saved; browser mode is intentionally limited to one file at a time.
+- Added same-link retry without consuming a new server grant, plus an explicit warned action for requesting a replacement link.
+- Selected-folder downloads now validate non-empty file responses, reject HTML/JSON error documents and transfer-length mismatches, remove partial files after failures, and enter history only after the write completes.
+- Completion history now distinguishes verified folder writes, user-confirmed browser saves, and legacy request records.
+- Completed results can be selected again; re-queuing them requires an explicit warning confirmation before their completion records are removed.
+- Added grouped compound filters and aligned the bulk-selection action order.
+
+## 1.2.0 — 2026-08-05
+
+- Added a user-authorized recursive scan of an extracted BMS library folder.
+- Added exact SHA-256 and MD5 matching against difficulty-table chart hashes.
+- Added an IndexedDB inventory that reuses hashes only when the same directory is selected and the relative path, size, and modification time are unchanged.
+- Added local installed/missing status, filters, counts, and CSV columns.
+- Prevented locally installed charts from bulk selection and removed hash-identical items from the pending queue after a completed scan.
+- Added a directory-upload fallback for browsers without `showDirectoryPicker()`.
+
+## 1.1.0 — 2026-08-04
+
+- Added a provider registry and provider-scoped queue/history keys so download backends can be added without duplicating the downloader core.
+- Added bounded exponential retries for temporary network and server failures, including `Retry-After` support.
+- Added a cooperative stop control that preserves the pending queue for a later run.
+- Cleaned up hidden browser-download frames after use and preserved rate-limit/error messages at batch completion.
 - Fixed the repository layout so development commands and the `docs/` Pages site live at the repository root.
 - Fixed separate-patch classification and progress tracking so both Song and Sabun sources are required.
 - Fixed request-history recognition for manually selected alternate search candidates.

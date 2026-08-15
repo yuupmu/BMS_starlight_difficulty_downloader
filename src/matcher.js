@@ -101,7 +101,9 @@ function selectionItemsForResult(result) {
     levelLabel: String(chart.levelSymbol || 'sr') + String(chart.level ?? ''),
     levelSymbol: String(chart.levelSymbol || 'sr'),
     tableId: String(chart.tableId || 'starlight'),
-    tableName: String(chart.tableName || 'Starlight')
+    tableName: String(chart.tableName || 'Starlight'),
+    sha256: String(chart.sha256 || ''),
+    md5: String(chart.md5 || '')
   };
 
   if (chart.url_diff && topSong?.item?.id && topSabun?.item?.id) {

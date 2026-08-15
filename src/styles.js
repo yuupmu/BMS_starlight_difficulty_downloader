@@ -14,14 +14,17 @@ function buildStyles(panelId) {
     #${panelId} button:disabled,#${panelId} select:disabled{opacity:.45;cursor:not-allowed}
     #${panelId} .sld-primary{background:#2563eb!important;border-color:#3b82f6!important}
     #${panelId} .sld-danger{background:#7f1d1d!important;border-color:#991b1b!important}
+    #${panelId} .sld-selection-actions{display:inline-grid;grid-template-columns:repeat(3,minmax(135px,1fr));gap:8px}
+    #${panelId} .sld-selection-actions button{width:100%;white-space:nowrap}
     #${panelId} .sld-language-wrap{display:inline-flex;gap:6px;align-items:center;white-space:nowrap;margin-left:auto}
     #${panelId} .sld-statusbar,#${panelId} .sld-queuebar{padding:9px 14px;border-bottom:1px solid #374151;display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:#111827}
     #${panelId} .sld-queuebar{background:#0f172a}
     #${panelId} progress{width:min(420px,42vw);height:14px}
     #${panelId} .sld-filters{display:flex;gap:5px;flex-wrap:wrap}
+    #${panelId} .sld-filter-group{display:inline-flex;gap:5px;padding-left:7px;border-left:1px solid #374151}
     #${panelId} .sld-filter.sld-active{background:#4f46e5}
     #${panelId} .sld-tablewrap{overflow:auto;flex:1;min-height:0}
-    #${panelId} table{width:100%;border-collapse:separate;border-spacing:0;min-width:1300px;color:#f9fafb;background:transparent}
+    #${panelId} table{width:100%;border-collapse:separate;border-spacing:0;min-width:1450px;color:#f9fafb;background:transparent}
     #${panelId} th{position:sticky;top:0;background:#0b1220;z-index:2;text-align:left;padding:9px;border-bottom:1px solid #4b5563;white-space:nowrap;color:#f9fafb;font-weight:700}
     #${panelId} td{padding:8px 9px;border-bottom:1px solid #263244;vertical-align:top;background:transparent;color:#f9fafb}
     #${panelId} tbody tr:hover td{background:#172033}
@@ -33,6 +36,9 @@ function buildStyles(panelId) {
     #${panelId} .sld-pill.bad{background:#7f1d1d;color:#fecaca}
     #${panelId} .sld-pill.info{background:#1e3a8a;color:#bfdbfe}
     #${panelId} .sld-pill.partial{background:#164e63;color:#a5f3fc}
+    #${panelId} .sld-pill.installed{background:#14532d;color:#bbf7d0}
+    #${panelId} .sld-library-status{max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #${panelId} .sld-local-path{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9ca3af;font-size:11px}
     #${panelId} .sld-matchbtn{display:block!important;margin:0 0 5px;width:100%;text-align:left;justify-content:flex-start!important;max-width:370px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     #${panelId} .sld-matchbtn.sld-requested{border-color:#047857;background:#064e3b}
     #${panelId} .sld-fallback{background:#164e63!important;border-color:#0e7490!important;margin:0 4px 5px 0}

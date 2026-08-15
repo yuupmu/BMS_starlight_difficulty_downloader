@@ -7,6 +7,14 @@ const { createHistoryStore } = require('./history');
 const { createApi } = require('./api');
 const { createQueueManager } = require('./queue');
 const { createUi } = require('./ui');
+const { createFilterState } = require('./filters');
+const {
+  scanLibrary,
+  createInventoryLookup,
+  chartInstallation,
+  createInventoryStore,
+  rootNameFromFiles
+} = require('./inventory');
 const {
   TABLE_CATALOG,
   getTable,
@@ -25,7 +33,8 @@ const {
 } = require('./matcher');
 const {
   createCsv,
-  downloadTextFile
+  downloadTextFile,
+  fileKey
 } = require('./utils');
 
 async function start() {
@@ -34,6 +43,7 @@ async function start() {
   }
 
   const storage = createStorage();
+  const inventoryStore = createInventoryStore();
   const savedPrefs = storage.loadPrefs();
   const translator = createTranslator(detectLanguage(savedPrefs.language, navigator.language));
 
@@ -75,7 +85,7 @@ async function start() {
     selectedTable,
     selectedLevels: { ...savedSelectedLevels, [selectedTable.id]: String(initialLevel) },
     selectedLevel: String(initialLevel),
-    selectedFilter: 'all',
+    selectedFilters: createFilterState(),
     searchStopped: false,
     searchRunning: false,
     searchRunId: 0,
@@ -83,7 +93,15 @@ async function start() {
     statusDescriptor: { key: 'status.loadingTable', variables: { table: selectedTable.name } },
     downloadQueue: storage.loadQueue(),
     downloadRunning: false,
+    downloadStopRequested: false,
     downloadDirectoryHandle: null,
+    browserPendingDownload: null,
+    reusableGrant: null,
+    libraryInventory: null,
+    libraryScanRunning: false,
+    libraryScanStopRequested: false,
+    libraryScanStats: null,
+    libraryScanMessage: '',
     batchSize,
     blockedUntil: Number(savedPrefs.blockedUntil) || 0,
     rateInfo: savedPrefs.rateInfo && typeof savedPrefs.rateInfo === 'object' ? savedPrefs.rateInfo : null,
@@ -136,7 +154,10 @@ async function start() {
     onChange(reason) {
       if (!ui || state.destroyed) return;
       ui.renderQueue();
-      if (['download-item-requested', 'history-retry'].includes(reason)) {
+      ui.renderLibraryStatus();
+      if (reason === 'clear-queue') {
+        ui.renderAllRows({ preserveSelection: false });
+      } else if (['download-item-requested', 'history-retry'].includes(reason)) {
         ui.renderAllRows();
         if (!ui.els.historyOverlay.hidden) ui.renderHistory();
       }
@@ -163,7 +184,7 @@ async function start() {
     state.levelCounts = new Map();
     state.charts = [];
     state.rows = [];
-    state.selectedFilter = 'all';
+    state.selectedFilters = createFilterState();
     savePrefs();
 
     if (ui) {
@@ -287,7 +308,7 @@ async function start() {
     state.searchRunning = true;
     state.selectedLevel = normalizedLevel;
     state.selectedLevels[state.selectedTableId] = normalizedLevel;
-    state.selectedFilter = 'all';
+    state.selectedFilters = createFilterState();
     state.charts = state.table.filter((entry) => String(entry.level).trim() === normalizedLevel);
     state.rows = [];
     if (options.force) storage.clearSearchResult(state.selectedTableId, normalizedLevel);
@@ -421,14 +442,26 @@ async function start() {
     });
   }
 
-  function selectionsFromRows(indexes) {
+  function selectionPlanFromRows(indexes) {
     const selections = [];
+    const completedEntries = new Map();
     for (const index of indexes) {
       const result = state.rows[index];
       if (!result) continue;
+      if (chartInstallation(result.chart, state.libraryInventory).status === 'installed') continue;
       selections.push(...selectionItemsForResult(result));
+      for (const [type, matches] of [['song', result.song?.matches], ['sabun', result.sabun?.matches]]) {
+        for (const match of matches || []) {
+          const entry = match?.item?.id && history.get(type, match.item.id, match.item.providerId);
+          if (entry) completedEntries.set(fileKey(entry.type, entry.id, entry.providerId), entry);
+        }
+      }
     }
-    return selections;
+    return { selections, completedEntries: [...completedEntries.values()] };
+  }
+
+  function confirmCompletedRedownload(entries) {
+    return !entries.length || confirm(translator.t('confirm.redownloadCompleted', { count: entries.length }));
   }
 
   async function handleCandidate({ type, id, rowIndex }) {
@@ -438,7 +471,7 @@ async function start() {
     const match = matches.find((candidate) => String(candidate.item?.id) === String(id));
     if (!match) return;
 
-    const enqueueResult = queueManager.enqueue([{
+    const item = {
       type,
       id,
       title: result.chart.title,
@@ -447,14 +480,19 @@ async function start() {
       levelLabel: formatLevel(state.selectedTable, result.chart.level),
       tableId: result.chart.tableId,
       tableName: result.chart.tableName,
-      levelSymbol: result.chart.levelSymbol
-    }]);
+      levelSymbol: result.chart.levelSymbol,
+      sha256: result.chart.sha256,
+      md5: result.chart.md5
+    };
+    const completedEntry = history.get(type, id, item.providerId);
+    if (completedEntry && !confirmCompletedRedownload([completedEntry])) return;
+    const enqueueResult = queueManager.enqueue([item], { allowCompleted: Boolean(completedEntry) });
     if (enqueueResult.added > 0) await queueManager.process(1);
   }
 
   function exportSearchResults() {
     const headers = [
-      'index', 'table_id', 'table_name', 'level', 'level_label', 'title', 'subtitle', 'artist', 'sha256', 'match_status', 'download_status',
+      'index', 'table_id', 'table_name', 'level', 'level_label', 'title', 'subtitle', 'artist', 'sha256', 'installation_status', 'installed_path', 'match_status', 'download_status',
       'song_match', 'song_file_id', 'song_score', 'sabun_match', 'sabun_file_id', 'sabun_score',
       'fallbacks', 'table_url', 'table_diff_url'
     ];
@@ -464,6 +502,7 @@ async function start() {
       const song = result.song.matches[0];
       const sabun = result.sabun.matches[0];
       const coverage = downloadCoverage(result, history);
+      const installation = chartInstallation(result.chart, state.libraryInventory);
       const downloadStatus = coverage.all
         ? 'requested'
         : coverage.partial
@@ -480,6 +519,8 @@ async function start() {
         result.chart.subtitle || '',
         result.chart.artist || '',
         result.chart.sha256 || '',
+        installation.status,
+        installation.entry?.path || '',
         result.classification.key,
         downloadStatus,
         song ? itemDisplay(song.item) : '',
@@ -543,7 +584,7 @@ async function start() {
     }
     try {
       const handle = await globalThis.showDirectoryPicker({
-        id: 'bms-difficulty-table-downloader',
+        id: CONFIG.pickerIds.downloadFolder,
         mode: 'readwrite'
       });
       state.downloadDirectoryHandle = handle;
@@ -557,11 +598,118 @@ async function start() {
     }
   }
 
+  async function scanLibrarySource(source, rootName) {
+    if (state.libraryScanRunning) return;
+    if (state.downloadRunning) {
+      state.libraryScanMessage = translator.t('inventory.downloadBusy');
+      ui.renderLibraryStatus();
+      return;
+    }
+    state.libraryScanRunning = true;
+    state.libraryScanStopRequested = false;
+    state.libraryScanStats = { discovered: 0, rehashed: 0, reused: 0, errors: 0 };
+    state.libraryScanMessage = translator.t('inventory.preparing', { name: rootName });
+    ui.renderLibraryStatus();
+    ui.renderQueue();
+
+    try {
+      const cached = await inventoryStore.load(rootName);
+      let previous = null;
+      if (source?.kind === 'directory'
+        && cached?.rootHandle
+        && typeof source.isSameEntry === 'function') {
+        try {
+          if (await source.isSameEntry(cached.rootHandle)) previous = cached;
+        } catch {}
+      }
+      const snapshot = await scanLibrary(source, previous, {
+        rootName,
+        isCancelled: () => state.libraryScanStopRequested || state.destroyed,
+        onProgress(stats) {
+          state.libraryScanStats = stats;
+          state.libraryScanMessage = translator.t('inventory.scanning', {
+            count: stats.discovered,
+            rehashed: stats.rehashed,
+            reused: stats.reused
+          });
+          ui.renderLibraryStatus();
+        }
+      });
+
+      if (!snapshot.complete || state.destroyed) {
+        state.libraryScanMessage = translator.t('inventory.stopped', { count: snapshot.stats.discovered });
+        return;
+      }
+
+      state.libraryInventory = createInventoryLookup(snapshot);
+      const persistedSnapshot = source?.kind === 'directory'
+        ? { ...snapshot, rootHandle: source }
+        : snapshot;
+      await inventoryStore.save(persistedSnapshot);
+      const queueBefore = state.downloadQueue.length;
+      state.downloadQueue = state.downloadQueue.filter((item) => (
+        chartInstallation(item, state.libraryInventory).status !== 'installed'
+      ));
+      const queueRemoved = queueBefore - state.downloadQueue.length;
+      if (queueRemoved > 0) storage.saveQueue(state.downloadQueue);
+      state.libraryScanMessage = translator.t('inventory.complete', {
+        name: snapshot.rootName,
+        count: snapshot.files.length,
+        rehashed: snapshot.stats.rehashed,
+        reused: snapshot.stats.reused,
+        errors: snapshot.stats.errors,
+        queueRemoved
+      });
+      ui.renderAllRows();
+      ui.renderQueue();
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        state.libraryScanMessage = translator.t('inventory.failure', { error: error?.message || String(error) });
+      }
+    } finally {
+      state.libraryScanRunning = false;
+      ui.renderLibraryStatus();
+      ui.renderQueue();
+    }
+  }
+
+  async function chooseLibraryFolder() {
+    if (state.libraryScanRunning) {
+      state.libraryScanStopRequested = true;
+      state.libraryScanMessage = translator.t('inventory.stopRequested');
+      ui.renderLibraryStatus();
+      return;
+    }
+    if (state.downloadRunning) {
+      state.libraryScanMessage = translator.t('inventory.downloadBusy');
+      ui.renderLibraryStatus();
+      return;
+    }
+    if (typeof globalThis.showDirectoryPicker !== 'function') {
+      ui.openLibraryFilePicker();
+      return;
+    }
+    try {
+      const handle = await globalThis.showDirectoryPicker({
+        id: CONFIG.pickerIds.libraryScan,
+        mode: 'read'
+      });
+      await scanLibrarySource(handle, handle.name);
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        state.libraryScanMessage = translator.t('inventory.failure', { error: error?.message || String(error) });
+        ui.renderLibraryStatus();
+      }
+    }
+  }
+
   function destroy() {
     if (state.destroyed) return;
     state.destroyed = true;
     state.searchStopped = true;
     state.searchRunId += 1;
+    state.libraryScanStopRequested = true;
+    queueManager?.stop();
     if (state.rateTimer) clearInterval(state.rateTimer);
     ui?.destroy();
     if (globalThis.__STARLIGHT_DIFFICULTY_DOWNLOADER__?.destroy === destroy) {
@@ -585,16 +733,23 @@ async function start() {
         startLevelSearch(level, { force: true });
       },
       onStopSearch: stopSearch,
+      onScanLibrary: chooseLibraryFolder,
+      onLibraryFiles(files) {
+        if (files?.length) scanLibrarySource(files, rootNameFromFiles(files));
+      },
       onClose: destroy,
       onCandidate: handleCandidate,
       onQueueSelected(indexes) {
-        const selections = selectionsFromRows(indexes);
+        const { selections, completedEntries } = selectionPlanFromRows(indexes);
         if (!selections.length) {
           state.queueMessage = translator.t('queue.selectFirst');
           ui.renderQueue();
           return;
         }
-        queueManager.enqueue(selections);
+        if (!confirmCompletedRedownload(completedEntries)) return;
+        for (const entry of completedEntries) history.remove(entry.type, entry.id, entry.providerId);
+        const result = queueManager.enqueue(selections, { allowCompleted: completedEntries.length > 0 });
+        if (result.added > 0) ui.renderAllRows({ preserveSelection: false });
       },
       onExportSearch: exportSearchResults,
       onBatchSizeChange(value) {
@@ -612,7 +767,20 @@ async function start() {
         ui.renderQueue();
       },
       onRunQueue() {
+        if (state.libraryScanRunning) return;
         queueManager.process(state.batchSize);
+      },
+      onConfirmBrowserDownload() {
+        queueManager.confirmBrowserDownload();
+      },
+      onRetryBrowserDownload() {
+        queueManager.retryPendingBrowserDownload();
+      },
+      onRequestNewBrowserGrant() {
+        queueManager.requestNewGrantForPending();
+      },
+      onStopQueue() {
+        queueManager.stop();
       },
       onClearQueue() {
         queueManager.clear();
@@ -628,7 +796,7 @@ async function start() {
         if (action === 'retry') {
           queueManager.removeHistoryAndRequeue(entry);
         } else if (action === 'remove') {
-          history.remove(entry.type, entry.id);
+          history.remove(entry.type, entry.id, entry.providerId);
           state.queueMessage = translator.t('history.recordRemoved');
         }
         refreshAfterHistoryChange();
