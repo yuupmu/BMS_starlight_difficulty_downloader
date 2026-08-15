@@ -90,7 +90,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.2.0';
   const ASSET_URL = new URL('./assets/starlight-difficulty-downloader.js', location.href).href;
   const SONGS_URL = 'https://horieyuuka.github.io/Songs';
   const LANGUAGE_KEY = 'starlight-difficulty-downloader:installer-language';
@@ -109,10 +109,10 @@
       usage1: 'BMS Library Songs 페이지를 엽니다.',
       usage2: '설치한 북마크를 실행합니다.',
       usage3: '오른쪽 위에서 언어를 고른 뒤, 원하는 난이도표와 레벨을 선택해 검색합니다.',
-      usage4: '곡을 선택해 대기열에 넣고 다운로드를 시작합니다. 제한이 발생하면 초기화 후 같은 버튼으로 재개합니다.',
+      usage4: '곡을 대기열에 넣고 다운로드합니다. 저장 폴더 모드는 완료를 확인하며 자동 배치를 지원하고, 브라우저 방식은 한 파일씩 저장 확인을 기다립니다.',
       resumeTitle: '중단 복구와 중복 방지',
-      resumeBody: '대기열, 서버 제한 시각, 브라우저로 전달한 파일 ID를 localStorage에 저장합니다. 페이지를 닫거나 다운로드 제한으로 중단되어도 다음 파일부터 이어가며, 요청 완료 이력과 같은 파일은 자동으로 건너뜁니다.',
-      completionNote: '“요청 완료”는 다운로드 URL이 발급되어 브라우저로 전달됐다는 뜻입니다. 웹페이지는 브라우저나 디스크에서 실제 저장이 끝났는지 확인할 수 없습니다. 실패한 파일은 도구의 다운로드 이력에서 “다시 받기”를 선택하세요.',
+      resumeBody: '대기열, 서버 제한 시각, 저장 완료 또는 사용자 확인 이력을 localStorage에 저장합니다. 브라우저 저장 확인 전에는 현재 항목을 대기열에 유지하며 페이지를 다시 열어도 확인 대기 상태를 복원합니다.',
+      completionNote: '저장 폴더 모드는 파일 쓰기 완료를 확인합니다. 브라우저 방식의 “저장 확인”은 사용자가 직접 확인한 결과이며, 저장되지 않았다면 같은 링크를 다시 열 수 있습니다. 새 링크 요청은 서버 허용량을 추가로 사용할 수 있습니다.',
       manualTitle: '수동 설치 및 개발자용',
       copyLoader: '로더 북마크 코드 복사',
       copyStandalone: 'Standalone 북마크 코드 복사',
@@ -141,10 +141,10 @@
       usage1: 'BMS Library の Songs ページを開きます。',
       usage2: 'インストールしたブックマークレットを実行します。',
       usage3: '右上で言語を選び、目的の難易度表とレベルを選択して検索します。',
-      usage4: '曲を選んでキューへ追加し、ダウンロードを開始します。制限時は解除後に同じボタンで再開します。',
+      usage4: '曲をキューへ追加してダウンロードします。保存先フォルダーモードは完了確認と自動バッチに対応し、ブラウザー方式は1件ずつ保存確認を待ちます。',
       resumeTitle: '中断からの再開と重複防止',
-      resumeBody: 'キュー、サーバー制限の解除時刻、ブラウザーへ送信したファイル ID を localStorage に保存します。ページを閉じたり制限で中断した場合も次のファイルから再開し、送信済み履歴と同じファイルは自動的にスキップします。',
-      completionNote: '「送信済み」はダウンロード URL が発行され、ブラウザーへ渡されたことを意味します。ブラウザーやディスクで保存が完了したかどうかはウェブページから確認できません。失敗したファイルはツールのダウンロード履歴から「再ダウンロード」を選択してください。',
+      resumeBody: 'キュー、サーバー制限の解除時刻、保存完了またはユーザー確認の履歴を localStorage に保存します。ブラウザー保存の確認前は現在の項目をキューに保持し、ページを開き直しても確認待ち状態を復元します。',
+      completionNote: '保存先フォルダーモードは書き込み完了を確認します。ブラウザー方式の「保存を確認」はユーザー自身の確認です。保存されなかった場合は同じリンクを再度開けます。新しいリンクの要求はサーバー許容量を追加消費する可能性があります。',
       manualTitle: '手動インストール・開発者向け',
       copyLoader: 'ローダーのブックマークコードをコピー',
       copyStandalone: 'Standalone コードをコピー',
@@ -173,10 +173,10 @@
       usage1: 'Open the BMS Library Songs page.',
       usage2: 'Run the bookmarklet you installed.',
       usage3: 'Choose a language, then select the desired difficulty table and level before searching.',
-      usage4: 'Select songs, add them to the queue, and start downloading. If a limit is reached, resume with the same button after the reset.',
+      usage4: 'Add songs to the queue and download them. Save-folder mode verifies completion and supports automatic batches; browser mode waits for confirmation after each file.',
       resumeTitle: 'Resume and duplicate prevention',
-      resumeBody: 'The queue, server reset time, and file IDs handed to the browser are saved in localStorage. After closing the page or hitting a download limit, the tool resumes from the next file and automatically skips IDs already present in request history.',
-      completionNote: '“Requested” means a download URL was issued and handed to the browser. A web page cannot verify that the browser or disk finished saving the file. Use “Download again” in the tool’s Download history for any failed file.',
+      resumeBody: 'The queue, server reset time, and verified or user-confirmed history are saved in localStorage. Before browser-save confirmation, the current item remains queued and its confirmation state is restored after reopening the page.',
+      completionNote: 'Save-folder mode verifies that the write completed. “Confirm saved” in browser mode records your own confirmation. Reopen the same link if no file appeared; requesting a new link may consume another server allowance.',
       manualTitle: 'Manual installation and developer options',
       copyLoader: 'Copy loader bookmark code',
       copyStandalone: 'Copy Standalone bookmark code',

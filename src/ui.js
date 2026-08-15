@@ -6,7 +6,8 @@ const { formatLevel } = require('./tables');
 const {
   escapeHtml,
   formatLocalDate,
-  formatRemaining
+  formatRemaining,
+  fileKey
 } = require('./utils');
 const {
   itemDisplay,
@@ -14,6 +15,12 @@ const {
   selectionItemsForResult
 } = require('./matcher');
 const { chartInstallation } = require('./inventory');
+const {
+  isFilterStateEmpty,
+  isFilterActive,
+  toggleFilter,
+  matchesFilters
+} = require('./filters');
 
 function createUi(options) {
   const {
@@ -48,10 +55,11 @@ function createUi(options) {
       <button id="sld-refresh-level" disabled></button>
       <button id="sld-scan-library"></button>
       <input id="sld-library-files" type="file" webkitdirectory multiple hidden>
-      <button id="sld-select-matched"></button>
-      <button id="sld-select-uninstalled"></button>
-      <button id="sld-clear-selection"></button>
-      <button id="sld-queue-selected" class="sld-primary"></button>
+      <span class="sld-selection-actions">
+        <button id="sld-select-matched"></button>
+        <button id="sld-clear-selection"></button>
+        <button id="sld-queue-selected" class="sld-primary"></button>
+      </span>
       <button id="sld-export"></button>
       <button id="sld-stop" class="sld-danger"></button>
       <span class="grow"></span>
@@ -67,13 +75,19 @@ function createUi(options) {
       <span class="grow"></span>
       <div class="sld-filters">
         <button class="sld-filter sld-active" data-filter="all"></button>
-        <button class="sld-filter" data-filter="pending"></button>
-        <button class="sld-filter" data-filter="uninstalled"></button>
-        <button class="sld-filter" data-filter="installed"></button>
-        <button class="sld-filter" data-filter="matched"></button>
-        <button class="sld-filter" data-filter="review"></button>
-        <button class="sld-filter" data-filter="missing"></button>
-        <button class="sld-filter" data-filter="requested"></button>
+        <span class="sld-filter-group" data-filter-group="download">
+          <button class="sld-filter" data-filter="pending"></button>
+          <button class="sld-filter" data-filter="requested"></button>
+        </span>
+        <span class="sld-filter-group" data-filter-group="installation">
+          <button class="sld-filter" data-filter="uninstalled"></button>
+          <button class="sld-filter" data-filter="installed"></button>
+        </span>
+        <span class="sld-filter-group" data-filter-group="match">
+          <button class="sld-filter" data-filter="matched"></button>
+          <button class="sld-filter" data-filter="review"></button>
+          <button class="sld-filter" data-filter="missing"></button>
+        </span>
       </div>
     </div>
     <div class="sld-queuebar">
@@ -84,6 +98,9 @@ function createUi(options) {
       <button id="sld-download-folder"></button>
       <button id="sld-browser-downloads" hidden></button>
       <button id="sld-run-queue" class="sld-primary"></button>
+      <button id="sld-confirm-browser-download" class="sld-primary" hidden></button>
+      <button id="sld-retry-browser-download" hidden></button>
+      <button id="sld-new-browser-grant" hidden></button>
       <button id="sld-stop-queue" class="sld-danger"></button>
       <button id="sld-clear-queue"></button>
       <span id="sld-queue-message" class="sld-queue-message sld-muted"></span>
@@ -138,7 +155,6 @@ function createUi(options) {
     scanLibrary: get('#sld-scan-library'),
     libraryFiles: get('#sld-library-files'),
     selectMatched: get('#sld-select-matched'),
-    selectUninstalled: get('#sld-select-uninstalled'),
     clearSelection: get('#sld-clear-selection'),
     queueSelected: get('#sld-queue-selected'),
     export: get('#sld-export'),
@@ -162,6 +178,9 @@ function createUi(options) {
     browserDownloads: get('#sld-browser-downloads'),
     batchSuffix: get('#sld-batch-suffix'),
     runQueue: get('#sld-run-queue'),
+    confirmBrowserDownload: get('#sld-confirm-browser-download'),
+    retryBrowserDownload: get('#sld-retry-browser-download'),
+    newBrowserGrant: get('#sld-new-browser-grant'),
     stopQueue: get('#sld-stop-queue'),
     clearQueue: get('#sld-clear-queue'),
     queueMessage: get('#sld-queue-message'),
@@ -200,14 +219,14 @@ function createUi(options) {
   }
 
   function rowMatchesFilter(result) {
-    if (state.selectedFilter === 'all') return true;
+    if (isFilterStateEmpty(state.selectedFilters)) return true;
     const installation = chartInstallation(result.chart, state.libraryInventory);
-    if (state.selectedFilter === 'installed') return installation.status === 'installed';
-    if (state.selectedFilter === 'uninstalled') return installation.status !== 'installed';
     const coverage = downloadCoverage(result, history);
-    if (state.selectedFilter === 'pending') return !coverage.all;
-    if (state.selectedFilter === 'requested') return coverage.all;
-    return result.classification?.key === state.selectedFilter;
+    return matchesFilters(state.selectedFilters, {
+      download: coverage.all ? 'requested' : 'pending',
+      installation: installation.status === 'installed' ? 'installed' : 'uninstalled',
+      match: result.classification?.key || 'missing'
+    });
   }
 
   function checkedRowIndexes() {
@@ -226,7 +245,7 @@ function createUi(options) {
       ? translator.t('table.requestedTooltip')
       : translator.t('table.candidateTooltip', { query: match.query, score: match.score });
     const statusSuffix = requested ? ` · ✓ ${translator.t('download.candidateRequested')}` : '';
-    return `<button class="sld-matchbtn${requested ? ' sld-requested' : ''}" data-download-type="${type}" data-file-id="${escapeHtml(match.item.id)}" data-row-index="${rowIndex}" title="${escapeHtml(title)}" ${requested ? 'disabled' : ''}>${escapeHtml(name)} <span class="sld-muted">(${match.score})${escapeHtml(statusSuffix)}</span></button>`;
+    return `<button class="sld-matchbtn${requested ? ' sld-requested' : ''}" data-download-type="${type}" data-file-id="${escapeHtml(match.item.id)}" data-row-index="${rowIndex}" title="${escapeHtml(title)}">${escapeHtml(name)} <span class="sld-muted">(${match.score})${escapeHtml(statusSuffix)}</span></button>`;
   }
 
   function downloadStatusHtml(result) {
@@ -262,7 +281,6 @@ function createUi(options) {
     const selections = selectionItemsForResult(result);
     const selectable = Boolean(
       selections.length
-      && !coverage.all
       && installation.status !== 'installed'
       && result.classification?.key !== 'missing'
     );
@@ -326,7 +344,9 @@ function createUi(options) {
 
   function refreshFilterButtons() {
     panel.querySelectorAll('.sld-filter').forEach((button) => {
-      button.classList.toggle('sld-active', button.dataset.filter === state.selectedFilter);
+      const active = isFilterActive(state.selectedFilters, button.dataset.filter);
+      button.classList.toggle('sld-active', active);
+      button.setAttribute('aria-pressed', String(active));
       if (['installed', 'uninstalled'].includes(button.dataset.filter)) {
         button.disabled = !state.libraryInventory;
       }
@@ -342,7 +362,6 @@ function createUi(options) {
         : translator.t('button.scanLibrary');
     els.scanLibrary.classList.toggle('sld-danger', state.libraryScanRunning);
     els.scanLibrary.disabled = state.downloadRunning && !state.libraryScanRunning;
-    els.selectUninstalled.disabled = !state.libraryInventory;
     refreshFilterButtons();
   }
 
@@ -377,8 +396,14 @@ function createUi(options) {
     els.queueCount.textContent = translator.t('queue.pendingCount', { count: state.downloadQueue.length });
     els.historyCount.textContent = translator.t('queue.historyCount', { count: history.size() });
     const nextItem = state.downloadQueue[0];
-    const defaultQueueMessage = nextItem
-      ? `${translator.t('queue.saved')} ${translator.t('queue.nextItem', { levelLabel: nextItem.levelLabel || `sr${nextItem.level}`, title: nextItem.title })}`
+    const browserPending = nextItem?.deliveryStatus === 'browser-pending';
+    const defaultQueueMessage = browserPending
+      ? translator.t('queue.browserConfirmationRequired', {
+        levelLabel: nextItem.levelLabel || `sr${nextItem.level}`,
+        title: nextItem.title
+      })
+      : nextItem
+        ? `${translator.t('queue.saved')} ${translator.t('queue.nextItem', { levelLabel: nextItem.levelLabel || `sr${nextItem.level}`, title: nextItem.title })}`
       : translator.t('queue.empty');
     els.queueMessage.textContent = state.queueMessage || defaultQueueMessage;
 
@@ -389,17 +414,37 @@ function createUi(options) {
     els.lastRequested.title = latest?.sourceName || latest?.title || '';
 
     const blocked = state.blockedUntil > Date.now();
-    els.runQueue.disabled = state.downloadRunning || state.libraryScanRunning || !state.downloadQueue.length || blocked;
+    const reusableGrant = Boolean(nextItem
+      && state.reusableGrant?.key === fileKey(nextItem.type, nextItem.id, nextItem.providerId));
+    els.runQueue.hidden = browserPending;
+    els.runQueue.disabled = state.downloadRunning
+      || state.libraryScanRunning
+      || !state.downloadQueue.length
+      || (blocked && !reusableGrant)
+      || browserPending;
+    els.confirmBrowserDownload.hidden = !browserPending;
+    els.retryBrowserDownload.hidden = !browserPending;
+    els.newBrowserGrant.hidden = !browserPending;
+    els.confirmBrowserDownload.disabled = state.downloadRunning;
+    els.retryBrowserDownload.disabled = state.downloadRunning || !state.browserPendingDownload;
+    els.newBrowserGrant.disabled = state.downloadRunning || blocked;
     els.stopQueue.disabled = !state.downloadRunning;
     els.clearQueue.disabled = state.downloadRunning || !state.downloadQueue.length;
-    els.batchSize.disabled = state.downloadRunning;
+    els.batchSize.disabled = state.downloadRunning || !state.downloadDirectoryHandle;
+    els.batchSize.title = state.downloadDirectoryHandle ? '' : translator.t('queue.browserManualMode');
     els.downloadFolder.disabled = state.downloadRunning;
     els.downloadFolder.textContent = state.downloadDirectoryHandle
       ? translator.t('button.changeFolder', { name: state.downloadDirectoryHandle.name })
       : translator.t('button.chooseFolder');
     els.browserDownloads.hidden = !state.downloadDirectoryHandle;
     els.browserDownloads.disabled = state.downloadRunning;
+    els.confirmBrowserDownload.textContent = translator.t('button.confirmBrowserDownload');
+    els.retryBrowserDownload.textContent = state.downloadDirectoryHandle
+      ? translator.t('button.retrySameLinkToFolder')
+      : translator.t('button.retrySameLink');
+    els.newBrowserGrant.textContent = translator.t('button.requestNewLink');
     if (state.downloadRunning) els.runQueue.textContent = translator.t('button.processing');
+    else if (reusableGrant) els.runQueue.textContent = translator.t('button.retrySameLinkToFolder');
     else if (blocked) els.runQueue.textContent = translator.t('button.resumeAfterLimit');
     else els.runQueue.textContent = translator.t('button.runQueue');
     renderRateStatus();
@@ -407,6 +452,11 @@ function createUi(options) {
 
   function renderHistory() {
     const entries = history.list();
+    const historyStatusKeys = {
+      saved: 'history.saved',
+      'browser-confirmed': 'history.browserConfirmed',
+      requested: 'history.requested'
+    };
     els.historySummary.textContent = translator.t('history.summary', { count: entries.length });
     els.clearHistory.disabled = entries.length === 0;
     els.exportHistory.disabled = entries.length === 0;
@@ -423,13 +473,14 @@ function createUi(options) {
         <td>${escapeHtml(translator.t(entry.type === 'sabun' ? 'history.sabun' : 'history.song'))}</td>
         <td><div class="sld-title">${escapeHtml(entry.title)}</div>${entry.sourceName ? `<div class="sld-muted">${escapeHtml(entry.sourceName)}</div>` : ''}</td>
         <td><span class="sld-id">${escapeHtml(entry.id)}</span></td>
+        <td>${escapeHtml(translator.t(historyStatusKeys[entry.status] || 'history.requested'))}</td>
         <td><div class="sld-history-actions"><button data-history-action="retry" data-history-provider="${escapeHtml(entry.providerId)}" data-history-type="${entry.type}" data-history-id="${escapeHtml(entry.id)}">${escapeHtml(translator.t('button.retry'))}</button><button data-history-action="remove" data-history-provider="${escapeHtml(entry.providerId)}" data-history-type="${entry.type}" data-history-id="${escapeHtml(entry.id)}">${escapeHtml(translator.t('button.removeRecord'))}</button></div></td>
       </tr>
     `).join('');
 
     els.historyBody.innerHTML = `
       <table>
-        <thead><tr><th>${escapeHtml(translator.t('history.time'))}</th><th>${escapeHtml(translator.t('history.level'))}</th><th>${escapeHtml(translator.t('history.type'))}</th><th>${escapeHtml(translator.t('history.titleColumn'))}</th><th>${escapeHtml(translator.t('history.id'))}</th><th>${escapeHtml(translator.t('history.actions'))}</th></tr></thead>
+        <thead><tr><th>${escapeHtml(translator.t('history.time'))}</th><th>${escapeHtml(translator.t('history.level'))}</th><th>${escapeHtml(translator.t('history.type'))}</th><th>${escapeHtml(translator.t('history.titleColumn'))}</th><th>${escapeHtml(translator.t('history.id'))}</th><th>${escapeHtml(translator.t('history.status'))}</th><th>${escapeHtml(translator.t('history.actions'))}</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
@@ -454,7 +505,6 @@ function createUi(options) {
     els.refreshLevel.textContent = translator.t('button.refreshSearch');
     renderLibraryStatus();
     els.selectMatched.textContent = translator.t('button.selectVisible');
-    els.selectUninstalled.textContent = translator.t('button.selectUninstalled');
     els.clearSelection.textContent = translator.t('button.clearSelection');
     els.queueSelected.textContent = translator.t('button.queueSelected');
     els.export.textContent = translator.t('button.exportCsv');
@@ -558,17 +608,6 @@ function createUi(options) {
     panel.querySelectorAll('.sld-row-select').forEach((checkbox) => { checkbox.checked = false; });
   }
 
-  function selectUninstalledRows() {
-    panel.querySelectorAll('tbody tr').forEach((tr) => {
-      const checkbox = tr.querySelector('.sld-row-select');
-      const result = state.rows[Number(tr.dataset.rowIndex)];
-      const installation = result && chartInstallation(result.chart, state.libraryInventory);
-      if (checkbox) checkbox.checked = Boolean(
-        !checkbox.disabled && installation?.status !== 'installed'
-      );
-    });
-  }
-
   function selectedRowIndexes() {
     return [...checkedRowIndexes()];
   }
@@ -581,9 +620,9 @@ function createUi(options) {
   panel.addEventListener('click', (event) => {
     const filter = event.target.closest('.sld-filter');
     if (filter) {
-      state.selectedFilter = filter.dataset.filter;
+      state.selectedFilters = toggleFilter(state.selectedFilters, filter.dataset.filter);
       refreshFilter();
-      handlers.onFilterChange?.(state.selectedFilter);
+      handlers.onFilterChange?.({ ...state.selectedFilters });
       return;
     }
 
@@ -612,7 +651,6 @@ function createUi(options) {
   els.stop.addEventListener('click', () => handlers.onStopSearch?.());
   els.close.addEventListener('click', () => handlers.onClose?.());
   els.selectMatched.addEventListener('click', () => selectVisibleRows());
-  els.selectUninstalled.addEventListener('click', () => selectUninstalledRows());
   els.clearSelection.addEventListener('click', () => clearSelectedRows());
   els.queueSelected.addEventListener('click', () => handlers.onQueueSelected?.(selectedRowIndexes()));
   els.export.addEventListener('click', () => handlers.onExportSearch?.());
@@ -620,6 +658,11 @@ function createUi(options) {
   els.downloadFolder.addEventListener('click', () => handlers.onChooseDirectory?.());
   els.browserDownloads.addEventListener('click', () => handlers.onUseBrowserDownloads?.());
   els.runQueue.addEventListener('click', () => handlers.onRunQueue?.());
+  els.confirmBrowserDownload.addEventListener('click', () => handlers.onConfirmBrowserDownload?.());
+  els.retryBrowserDownload.addEventListener('click', () => handlers.onRetryBrowserDownload?.());
+  els.newBrowserGrant.addEventListener('click', () => {
+    if (confirm(translator.t('confirm.requestNewGrant'))) handlers.onRequestNewBrowserGrant?.();
+  });
   els.stopQueue.addEventListener('click', () => handlers.onStopQueue?.());
   els.clearQueue.addEventListener('click', () => {
     if (!state.downloadQueue.length) return;

@@ -1,7 +1,7 @@
 'use strict';
 
 const { CONFIG } = require('./config');
-const { extractRateInfo, isRateLimitError } = require('./api');
+const { extractRateInfo, isRateLimitError, parseRetryAfter } = require('./api');
 const { sleep, fileKey, formatLocalDate } = require('./utils');
 
 const TRANSIENT_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
@@ -21,6 +21,29 @@ function retryDelayMs(error, attempt, config = CONFIG, random = Math.random) {
     config.downloadRetryBaseMs * (2 ** Math.max(0, attempt - 1))
   );
   return Math.round(exponential * (0.75 + random() * 0.5));
+}
+
+function byteLength(value) {
+  if (value === undefined || value === null) return 0;
+  if (Number.isFinite(Number(value.byteLength))) return Number(value.byteLength);
+  if (Number.isFinite(Number(value.size))) return Number(value.size);
+  if (typeof value === 'string') return new TextEncoder().encode(value).byteLength;
+  return 0;
+}
+
+function looksLikeErrorDocument(value) {
+  let bytes;
+  if (value instanceof Uint8Array) bytes = value;
+  else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+  else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  else if (typeof value === 'string') bytes = new TextEncoder().encode(value);
+  else return false;
+  const text = new TextDecoder().decode(bytes.slice(0, 1024)).replace(/^\uFEFF/, '').trimStart().toLowerCase();
+  return text.startsWith('<!doctype html')
+    || text.startsWith('<html')
+    || text.startsWith('<head')
+    || text.startsWith('<body')
+    || /^\{\s*"(?:error|message)"\s*:/.test(text);
 }
 
 function createQueueManager(options) {
@@ -87,7 +110,8 @@ function createQueueManager(options) {
     return removed;
   }
 
-  function enqueue(items) {
+  function enqueue(items, enqueueOptions = {}) {
+    const allowCompleted = Boolean(enqueueOptions.allowCompleted);
     const existing = new Set(state.downloadQueue.map((item) => fileKey(item.type, item.id, item.providerId)));
     let added = 0;
     let alreadyRequested = 0;
@@ -98,8 +122,11 @@ function createQueueManager(options) {
       const providerId = String(rawItem.providerId || config.defaultProviderId);
       const key = fileKey(rawItem.type, rawItem.id, providerId);
       if (history.has(rawItem.type, rawItem.id, providerId)) {
-        alreadyRequested += 1;
-        continue;
+        if (allowCompleted) history.remove(rawItem.type, rawItem.id, providerId);
+        else {
+          alreadyRequested += 1;
+          continue;
+        }
       }
       if (existing.has(key)) {
         alreadyQueued += 1;
@@ -122,7 +149,10 @@ function createQueueManager(options) {
         addedAt: new Date().toISOString(),
         attempts: 0,
         lastAttemptAt: null,
-        lastError: ''
+        lastError: '',
+        deliveryStatus: '',
+        lastGrantedAt: null,
+        lastGrantedFileName: ''
       });
       added += 1;
     }
@@ -145,6 +175,8 @@ function createQueueManager(options) {
 
   function clear() {
     state.downloadQueue = [];
+    state.browserPendingDownload = null;
+    state.reusableGrant = null;
     storage.clearQueue();
     state.queueMessage = translator.t('queue.cleared');
     notify('clear-queue');
@@ -202,11 +234,43 @@ function createQueueManager(options) {
       try {
         await directory.getFileHandle(candidate, { create: false });
       } catch (error) {
-        if (error?.name === 'NotFoundError') return directory.getFileHandle(candidate, { create: true });
+        if (error?.name === 'NotFoundError') {
+          return {
+            fileName: candidate,
+            fileHandle: await directory.getFileHandle(candidate, { create: true })
+          };
+        }
         throw error;
       }
     }
     throw new Error('Could not create a unique filename in the selected folder.');
+  }
+
+  async function responseError(response) {
+    let payload = {};
+    try {
+      const readable = typeof response.clone === 'function' ? response.clone() : response;
+      if (typeof readable.json === 'function') payload = await readable.json();
+    } catch {}
+    const message = typeof payload?.error === 'string'
+      ? payload.error
+      : `File download failed: ${response.status} ${response.statusText || ''}`.trim();
+    const error = new Error(message);
+    error.status = response.status;
+    error.payload = payload && typeof payload === 'object' ? payload : {};
+    error.retryAfterMs = parseRetryAfter(response.headers?.get?.('retry-after'));
+    if (error.status === 429 && error.retryAfterMs !== null && !error.payload.windowResetsAt) {
+      error.payload.remainingInWindow = 0;
+      error.payload.windowResetsAt = new Date(Date.now() + error.retryAfterMs).toISOString();
+    }
+    return error;
+  }
+
+  function validateDownloadStart(value, contentType) {
+    if (!byteLength(value)) throw new Error('The download server returned an empty file.');
+    if (/^(?:text\/html|application\/json)\b/i.test(contentType) || looksLikeErrorDocument(value)) {
+      throw new Error(`The download server returned ${contentType || 'an error document'} instead of a BMS file.`);
+    }
   }
 
   async function saveToSelectedDirectory(directory, payload, item) {
@@ -214,42 +278,101 @@ function createQueueManager(options) {
     const fetchFn = options.fetchFn || globalThis.fetch?.bind(globalThis);
     if (!fetchFn) throw new Error('This browser cannot save directly to a selected folder.');
     const response = await fetchFn(absolute, { credentials: 'include' });
-    if (!response.ok) {
-      const error = new Error(`File download failed: ${response.status} ${response.statusText}`);
-      error.status = response.status;
-      throw error;
-    }
+    if (!response.ok) throw await responseError(response);
     const contentType = response.headers?.get?.('content-type') || '';
-    if (/^(?:text\/html|application\/json)\b/i.test(contentType)) {
-      throw new Error(`The download server returned ${contentType} instead of an archive.`);
+    const contentEncoding = response.headers?.get?.('content-encoding') || '';
+    const declaredLengthHeader = response.headers?.get?.('content-length');
+    const declaredLength = declaredLengthHeader === null || declaredLengthHeader === undefined || declaredLengthHeader === ''
+      ? null
+      : Number(declaredLengthHeader);
+    if (declaredLength !== null && Number.isFinite(declaredLength) && declaredLength <= 0) {
+      throw new Error('The download server returned an empty file.');
     }
-    const fileHandle = await unusedFileHandle(directory, fileNameFromResponse(response, payload, item));
-    const writable = await fileHandle.createWritable();
-    try {
-      if (response.body?.pipeTo) {
-        await response.body.pipeTo(writable);
-      } else {
-        await writable.write(await response.blob());
-        await writable.close();
+
+    let firstChunk = null;
+    let reader = null;
+    let blob = null;
+    if (response.body?.getReader) {
+      reader = response.body.getReader();
+      while (!firstChunk) {
+        const part = await reader.read();
+        if (part.done) break;
+        if (byteLength(part.value)) firstChunk = part.value;
       }
+      validateDownloadStart(firstChunk, contentType);
+    } else {
+      blob = await response.blob();
+      const prefix = new Uint8Array(await blob.slice(0, 1024).arrayBuffer());
+      validateDownloadStart(prefix, contentType);
+    }
+
+    const target = await unusedFileHandle(directory, fileNameFromResponse(response, payload, item));
+    let writable = null;
+    let written = 0;
+    try {
+      writable = await target.fileHandle.createWritable();
+      if (reader) {
+        await writable.write(firstChunk);
+        written += byteLength(firstChunk);
+        while (true) {
+          const part = await reader.read();
+          if (part.done) break;
+          if (!byteLength(part.value)) continue;
+          await writable.write(part.value);
+          written += byteLength(part.value);
+        }
+      } else {
+        await writable.write(blob);
+        written = byteLength(blob);
+      }
+      if (declaredLength !== null && Number.isFinite(declaredLength) && !contentEncoding && written !== declaredLength) {
+        throw new Error(`The download ended early (${written}/${declaredLength} bytes).`);
+      }
+      await writable.close();
     } catch (error) {
-      await writable.abort?.().catch?.(() => {});
+      await writable?.abort?.().catch?.(() => {});
+      await directory.removeEntry?.(target.fileName).catch?.(() => {});
       throw error;
     }
+    return { mode: 'folder', fileName: target.fileName, bytesWritten: written };
   }
 
   async function deliverDownload(payload, item) {
     if (state.downloadDirectoryHandle) {
-      await saveToSelectedDirectory(state.downloadDirectoryHandle, payload, item);
-      return;
+      return saveToSelectedDirectory(state.downloadDirectoryHandle, payload, item);
     }
     triggerBrowserDownload(payload.downloadUrl);
+    return { mode: 'browser' };
+  }
+
+  function itemKey(item) {
+    return fileKey(item.type, item.id, item.providerId);
+  }
+
+  function pendingBrowserItem() {
+    const item = state.downloadQueue[0];
+    return item?.deliveryStatus === 'browser-pending' ? item : null;
+  }
+
+  function matchingGrant(holder, item) {
+    return holder?.key === itemKey(item) && holder.payload?.downloadUrl ? holder : null;
   }
 
   async function process(maxItems = state.batchSize) {
     if (state.downloadRunning || !state.downloadQueue.length) return { completed: 0, skipped: 0 };
+    const awaitingConfirmation = pendingBrowserItem();
+    if (awaitingConfirmation) {
+      setMessage(translator.t('queue.browserConfirmationRequired', {
+        levelLabel: awaitingConfirmation.levelLabel || `sr${awaitingConfirmation.level}`,
+        title: awaitingConfirmation.title
+      }));
+      return { completed: 0, skipped: 0, awaitingConfirmation: 1 };
+    }
+
     expireBlockIfNeeded();
-    if (state.blockedUntil > Date.now()) {
+    const firstItem = state.downloadQueue[0];
+    const reusableAtStart = matchingGrant(state.reusableGrant, firstItem);
+    if (state.blockedUntil > Date.now() && !reusableAtStart) {
       setMessage(translator.t('queue.limitBlocked', { time: formatTime(state.blockedUntil) }));
       return { completed: 0, skipped: 0 };
     }
@@ -272,9 +395,11 @@ function createQueueManager(options) {
     let skipped = initiallyPruned;
     let finalReason = '';
     const safeMode = maxItems === config.safeBatchValue;
-    const requestedTarget = safeMode
-      ? state.downloadQueue.length
-      : Math.max(1, Number(maxItems) || config.defaultBatchSize);
+    const requestedTarget = state.downloadDirectoryHandle
+      ? safeMode
+        ? state.downloadQueue.length
+        : Math.max(1, Number(maxItems) || config.defaultBatchSize)
+      : 1;
     const knownWindowRemaining = Number(state.rateInfo?.remainingInWindow);
     const target = Number.isFinite(knownWindowRemaining) && knownWindowRemaining > 0
       ? Math.min(requestedTarget, knownWindowRemaining)
@@ -293,6 +418,8 @@ function createQueueManager(options) {
 
         let attemptsThisRun = 0;
         let itemComplete = false;
+        let payload = matchingGrant(state.reusableGrant, item)?.payload || null;
+        if (payload) state.reusableGrant = null;
         while (!itemComplete && !state.downloadStopRequested) {
           attemptsThisRun += 1;
           state.queueMessage = translator.t('queue.processingItem', {
@@ -308,13 +435,35 @@ function createQueueManager(options) {
           notify('download-item-start');
 
           try {
-            const payload = await api.grant(item);
-            applyRateInfo(payload, false);
-            await deliverDownload(payload, item);
+            if (!payload) {
+              payload = await api.grant(item);
+              applyRateInfo(payload, false);
+            }
+            const delivery = await deliverDownload(payload, item);
+
+            if (delivery.mode === 'browser') {
+              item.deliveryStatus = 'browser-pending';
+              item.lastGrantedAt = new Date().toISOString();
+              item.lastGrantedFileName = String(payload.fileName || payload.filename || payload.name || '');
+              state.browserPendingDownload = { key: itemKey(item), payload };
+              state.queueMessage = translator.t('queue.browserAwaitingConfirmation', {
+                levelLabel: item.levelLabel || `sr${item.level}`,
+                title: item.title
+              });
+              saveQueue();
+              itemComplete = true;
+              finalReason = 'browser-confirmation';
+              notify('browser-download-pending');
+              break;
+            }
 
             // Record first, then remove from the queue. If execution is interrupted between
             // these two writes, the next run prunes the remaining queue item by history key.
-            history.markRequested(item, payload);
+            history.markRequested(item, {
+              ...payload,
+              fileName: delivery.fileName || payload.fileName,
+              status: 'saved'
+            });
             state.downloadQueue.shift();
             saveQueue();
             completed += 1;
@@ -343,7 +492,8 @@ function createQueueManager(options) {
               break;
             }
 
-            if (isTransientDownloadError(error) && attemptsThisRun < config.downloadRetryMaxAttempts) {
+            const transient = isTransientDownloadError(error);
+            if (transient && attemptsThisRun < config.downloadRetryMaxAttempts) {
               const delay = retryDelayMs(error, attemptsThisRun, config, randomFn);
               state.queueMessage = translator.t('queue.retrying', {
                 attempt: attemptsThisRun + 1,
@@ -354,6 +504,10 @@ function createQueueManager(options) {
               notify('download-retry');
               await sleepFn(delay);
               continue;
+            }
+
+            if (transient && payload?.downloadUrl) {
+              state.reusableGrant = { key: itemKey(item), payload };
             }
 
             state.queueMessage = translator.t('queue.currentFailure', { error: item.lastError });
@@ -385,6 +539,57 @@ function createQueueManager(options) {
     return { completed, skipped };
   }
 
+  function confirmBrowserDownload() {
+    if (state.downloadRunning) return false;
+    const item = pendingBrowserItem();
+    if (!item) return false;
+    const cached = matchingGrant(state.browserPendingDownload, item);
+    history.markRequested(item, {
+      ...(cached?.payload || {}),
+      fileName: item.lastGrantedFileName || cached?.payload?.fileName || cached?.payload?.filename || '',
+      status: 'browser-confirmed'
+    });
+    state.downloadQueue.shift();
+    state.browserPendingDownload = null;
+    state.reusableGrant = null;
+    state.queueMessage = translator.t('queue.browserConfirmed', {
+      levelLabel: item.levelLabel || `sr${item.level}`,
+      title: item.title
+    });
+    saveQueue();
+    notify('download-item-requested');
+    return true;
+  }
+
+  async function retryPendingBrowserDownload() {
+    if (state.downloadRunning) return false;
+    const item = pendingBrowserItem();
+    const cached = item && matchingGrant(state.browserPendingDownload, item);
+    if (!item || !cached) return false;
+    item.deliveryStatus = '';
+    item.lastError = '';
+    state.browserPendingDownload = null;
+    state.reusableGrant = cached;
+    state.queueMessage = translator.t('queue.browserRetryingSameLink');
+    saveQueue();
+    notify('browser-download-retry');
+    return process(1);
+  }
+
+  async function requestNewGrantForPending() {
+    if (state.downloadRunning) return false;
+    const item = pendingBrowserItem();
+    if (!item) return false;
+    item.deliveryStatus = '';
+    item.lastError = '';
+    state.browserPendingDownload = null;
+    state.reusableGrant = null;
+    state.queueMessage = translator.t('queue.browserRequestingNewLink');
+    saveQueue();
+    notify('browser-download-new-grant');
+    return process(1);
+  }
+
   function stop() {
     if (!state.downloadRunning) return false;
     state.downloadStopRequested = true;
@@ -406,6 +611,9 @@ function createQueueManager(options) {
     clear,
     stop,
     process,
+    confirmBrowserDownload,
+    retryPendingBrowserDownload,
+    requestNewGrantForPending,
     pruneCompleted,
     expireBlockIfNeeded,
     applyRateInfo,

@@ -73,7 +73,10 @@ function createStorage(storageLike) {
       addedAt: item.addedAt || new Date().toISOString(),
       attempts: Number.isFinite(Number(item.attempts)) ? Number(item.attempts) : 0,
       lastAttemptAt: item.lastAttemptAt || null,
-      lastError: item.lastError || ''
+      lastError: item.lastError || '',
+      deliveryStatus: item.deliveryStatus === 'browser-pending' ? 'browser-pending' : '',
+      lastGrantedAt: item.lastGrantedAt || null,
+      lastGrantedFileName: String(item.lastGrantedFileName || '')
     };
   }
 

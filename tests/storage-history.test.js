@@ -73,6 +73,25 @@ test('queue and history preserve difficulty table metadata', () => {
   assert.equal(history.latest().sha256, 'abc123');
 });
 
+test('browser confirmation state survives a page reload without persisting the temporary URL', () => {
+  const backing = memoryStorage();
+  const storage = createStorage(backing);
+  storage.saveQueue([{
+    type: 'song',
+    id: 'pending-browser',
+    title: 'Pending browser download',
+    deliveryStatus: 'browser-pending',
+    lastGrantedAt: '2026-08-15T00:00:00.000Z',
+    lastGrantedFileName: 'pending.zip',
+    downloadUrl: 'https://example.invalid/temporary-secret'
+  }]);
+
+  const [restored] = storage.loadQueue();
+  assert.equal(restored.deliveryStatus, 'browser-pending');
+  assert.equal(restored.lastGrantedFileName, 'pending.zip');
+  assert.equal('downloadUrl' in restored, false);
+});
+
 test('search caches are isolated by table id and level', () => {
   const storage = createStorage(memoryStorage());
   storage.saveSearchResult('starlight', '10', [{ chart: { title: 'SR' } }], true);

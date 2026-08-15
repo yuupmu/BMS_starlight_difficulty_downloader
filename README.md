@@ -20,13 +20,14 @@ GitHub README pages cannot safely execute a `javascript:` bookmark directly. Dra
 - Korean, Japanese, and English UI with a selector in the upper-right corner.
 - Searches both the BMS Library Songs and Sabuns endpoints.
 - Restores cached results per table and level without repeating API searches, and resumes partial searches.
-- A **Not downloaded** filter plus **Select all visible** for flexible bulk selection.
+- Compound filters: combine one download state (**Not downloaded/Confirmed**), one local state (**Not installed/Installed**), and one match state (**High confidence/Review/No match**). Selecting within a group replaces that group's choice, clicking an active choice clears it, and **All** resets every group.
+- **Select all visible** selects the rows produced by the combined filters.
 - Direct folder selection and streamed writes in Chrome/Edge without overwriting existing files.
 - An **Up to server allowance (auto)** batch mode in addition to fixed batch sizes.
-- Persistent queue, rate-limit reset time, preferences, and requested-file history.
+- Persistent queue, rate-limit reset time, preferences, and download-completion history.
 - Resumes from the first pending item after the page is closed or a request limit is reached.
 - Bounded exponential retry for temporary network/5xx failures, plus a stop button that leaves the remaining queue intact.
-- Prevents duplicate requests by storing each successful request under its provider, source type, and file ID.
+- Prevents duplicate downloads by recording folder-write completion or browser save confirmation under the provider, source type, and file ID.
 - Scans one user-selected, extracted BMS root folder and compares chart files to table SHA-256/MD5 hashes.
 - Shows installed/missing filters and excludes installed charts from bulk selection and the pending queue.
 - Reuses unchanged file hashes on later scans through a browser-local IndexedDB inventory.
@@ -125,7 +126,8 @@ starlight-difficulty-downloader/
 │   ├── api.js                         # table and BMS Library network access
 │   ├── app.js                         # application orchestration
 │   ├── config.js                      # URLs, constants, fallback links
-│   ├── history.js                     # requested-file history and duplicate keys
+│   ├── filters.js                     # compound filter state and toggles
+│   ├── history.js                     # completion history and duplicate keys
 │   ├── i18n.js                        # ko / ja / en translations
 │   ├── inventory.js                   # local BMS folder scan, hashes, incremental index
 │   ├── main.js                        # bundle entry point
@@ -146,15 +148,17 @@ starlight-difficulty-downloader/
 
 The queue and history are stored in `localStorage` on the BMS Library origin.
 
-After the server returns a download URL, the tool triggers the browser download and records the provider, source type, and file ID. It then removes the item from the queue. If execution stops between those writes, the next run sees the history key and prunes the duplicate queue item automatically.
+In **Choose save folder** mode, the tool records history and removes an item from the queue only after the response and disk write finish successfully. In browser-download mode, it hands off one file and waits for **Confirm saved**; it neither removes the item nor advances until the user confirms. This pending-confirmation state survives a page reload, but the temporary download URL itself is not persisted.
 
-A chart with a separate chart patch can require two records: one Song package and one Sabun file. Partial progress is displayed as `1/2 requested`.
+Completed rows remain selectable. If **Selection → queue** includes completed files, the tool shows one warning and removes their completion records only after confirmation before adding them again.
+
+A chart with a separate chart patch can require two records: one Song package and one Sabun file. Partial progress is displayed as `1/2 confirmed`.
 
 Search results are also cached in `localStorage` per table and level. **Search** restores that cache; **Search again** clears it and starts fresh.
 
 ## Detect charts already installed locally
 
-Choose **Scan BMS folder** and select the top-level folder that contains the extracted song folders. The scanner recursively reads only `.bms`, `.bme`, `.bml`, and `.pms` chart files. It computes SHA-256 and MD5 locally, compares them with the selected difficulty table, and never uploads file contents or paths.
+Choose **Scan BMS folder** in the tool's top control row and select the top-level folder that contains the extracted song folders. The scanner does not read the whole disk or anything outside the selected folder. It recursively reads only `.bms`, `.bme`, `.bml`, and `.pms` chart files. It computes SHA-256 and MD5 locally, compares them with the selected difficulty table, and never uploads file contents or paths.
 
 After a complete scan:
 
@@ -166,17 +170,25 @@ After a complete scan:
 
 The first scan hashes every chart. Later scans reuse a cached hash only when the browser confirms that the same directory was selected and its relative path, size, and modification time are unchanged. The cache is stored in IndexedDB on the BMS Library origin. The user still selects the folder because the browser does not allow a bookmarklet to inspect arbitrary local files silently.
 
-Keep each song's existing directory structure. Flattening chart files can break their relative audio/image references. Scan an extracted library; ZIP, RAR, and 7z contents are not inspected.
+- A folder in any location can be scanned by selecting that folder or one of its parents. Files outside the selected tree are not detected.
+- Renaming a chart file or folder does not prevent detection as long as the chart contents are unchanged, because matching uses content hashes.
+- Editing the chart contents or changing it to an unsupported extension can prevent detection.
+- ZIP, RAR, and 7z contents are not inspected. Select an extracted library.
+- The download destination and scanned library are independent. After downloading or moving files, include their location in the selected scan tree and choose **Rescan BMS folder**.
+
+Keep each song's existing directory structure. Flattening chart files can break their relative audio/image references.
 
 ## Save folder and automatic batches
 
-In Chrome/Edge, **Choose save folder** selects a folder for the current run and streams files there without overwriting an existing name. Browser security does not expose the full local path and may require the folder to be selected again after reopening the page. Other browsers use their normal download-location settings.
+In Chrome/Edge, **Choose save folder** selects a folder for the current run and streams files there without overwriting an existing name. Automatic multi-file batches run only in this mode. The transfer rejects empty responses, HTML/JSON error documents, and content-length mismatches. A failed write removes its partial file and keeps the item at the front of the queue. Transfer retries reuse the issued download URL first to avoid consuming another server grant.
 
-**Up to server allowance (auto)** follows the remaining count reported by the server and stops with the queue preserved when the count reaches zero. Browser-managed downloads can still be subject to the browser’s multiple-download permission; selected-folder mode is preferable for large batches.
+Browser security does not expose the full local path and may require the folder to be selected again after reopening the page. Other browsers hand off one file at a time. Use **Confirm saved** after checking the file, or **Reopen same link** when it did not appear. Use **Request new link** only after the old link expires because it can consume another server allowance.
+
+**Up to server allowance (auto)** follows the remaining count reported by the server and stops with the queue preserved when the count reaches zero. Automatic batches are enabled only in selected-folder mode.
 
 ### Important limitation
 
-**Requested** means the server issued a URL and the tool handed it to the browser. A web page cannot reliably verify that the browser or disk completed the transfer. If a browser download fails after it was handed off, open **Download history** and choose **Download again** for that file.
+Completion in selected-folder mode means the tool verified that the file write finished. **Confirm saved** in browser mode records the user's confirmation; it does not mean the page technically detected browser completion. Closing the page before confirmation leaves that item in the queue.
 
 ## Stored data
 
@@ -186,10 +198,11 @@ The tool stores only local preferences and operational metadata:
 - batch size;
 - pending queue;
 - rate-limit counters and reset time returned by the server;
-- requested file type, ID, title, level, and timestamp.
-- up to eight recent per-table/per-level search result caches.
+- confirmed file type, ID, title, level, timestamp, and completion method (verified folder write, browser user confirmation, or legacy request record);
+- up to eight recent per-table/per-level search result caches;
+- relative path, size, modification time, SHA-256/MD5 hashes, and selected-folder metadata for scanned local charts.
 
-The project does not operate a separate server and does not upload this history elsewhere.
+The local chart index is stored only in IndexedDB on the BMS Library origin. The project does not operate a separate server and does not upload this metadata or file contents elsewhere.
 
 ## Data sources and attribution
 

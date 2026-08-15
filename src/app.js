@@ -7,6 +7,7 @@ const { createHistoryStore } = require('./history');
 const { createApi } = require('./api');
 const { createQueueManager } = require('./queue');
 const { createUi } = require('./ui');
+const { createFilterState } = require('./filters');
 const {
   scanLibrary,
   createInventoryLookup,
@@ -32,7 +33,8 @@ const {
 } = require('./matcher');
 const {
   createCsv,
-  downloadTextFile
+  downloadTextFile,
+  fileKey
 } = require('./utils');
 
 async function start() {
@@ -83,7 +85,7 @@ async function start() {
     selectedTable,
     selectedLevels: { ...savedSelectedLevels, [selectedTable.id]: String(initialLevel) },
     selectedLevel: String(initialLevel),
-    selectedFilter: 'all',
+    selectedFilters: createFilterState(),
     searchStopped: false,
     searchRunning: false,
     searchRunId: 0,
@@ -93,6 +95,8 @@ async function start() {
     downloadRunning: false,
     downloadStopRequested: false,
     downloadDirectoryHandle: null,
+    browserPendingDownload: null,
+    reusableGrant: null,
     libraryInventory: null,
     libraryScanRunning: false,
     libraryScanStopRequested: false,
@@ -151,7 +155,9 @@ async function start() {
       if (!ui || state.destroyed) return;
       ui.renderQueue();
       ui.renderLibraryStatus();
-      if (['download-item-requested', 'history-retry'].includes(reason)) {
+      if (reason === 'clear-queue') {
+        ui.renderAllRows({ preserveSelection: false });
+      } else if (['download-item-requested', 'history-retry'].includes(reason)) {
         ui.renderAllRows();
         if (!ui.els.historyOverlay.hidden) ui.renderHistory();
       }
@@ -178,7 +184,7 @@ async function start() {
     state.levelCounts = new Map();
     state.charts = [];
     state.rows = [];
-    state.selectedFilter = 'all';
+    state.selectedFilters = createFilterState();
     savePrefs();
 
     if (ui) {
@@ -302,7 +308,7 @@ async function start() {
     state.searchRunning = true;
     state.selectedLevel = normalizedLevel;
     state.selectedLevels[state.selectedTableId] = normalizedLevel;
-    state.selectedFilter = 'all';
+    state.selectedFilters = createFilterState();
     state.charts = state.table.filter((entry) => String(entry.level).trim() === normalizedLevel);
     state.rows = [];
     if (options.force) storage.clearSearchResult(state.selectedTableId, normalizedLevel);
@@ -436,15 +442,26 @@ async function start() {
     });
   }
 
-  function selectionsFromRows(indexes) {
+  function selectionPlanFromRows(indexes) {
     const selections = [];
+    const completedEntries = new Map();
     for (const index of indexes) {
       const result = state.rows[index];
       if (!result) continue;
       if (chartInstallation(result.chart, state.libraryInventory).status === 'installed') continue;
       selections.push(...selectionItemsForResult(result));
+      for (const [type, matches] of [['song', result.song?.matches], ['sabun', result.sabun?.matches]]) {
+        for (const match of matches || []) {
+          const entry = match?.item?.id && history.get(type, match.item.id, match.item.providerId);
+          if (entry) completedEntries.set(fileKey(entry.type, entry.id, entry.providerId), entry);
+        }
+      }
     }
-    return selections;
+    return { selections, completedEntries: [...completedEntries.values()] };
+  }
+
+  function confirmCompletedRedownload(entries) {
+    return !entries.length || confirm(translator.t('confirm.redownloadCompleted', { count: entries.length }));
   }
 
   async function handleCandidate({ type, id, rowIndex }) {
@@ -454,7 +471,7 @@ async function start() {
     const match = matches.find((candidate) => String(candidate.item?.id) === String(id));
     if (!match) return;
 
-    const enqueueResult = queueManager.enqueue([{
+    const item = {
       type,
       id,
       title: result.chart.title,
@@ -466,7 +483,10 @@ async function start() {
       levelSymbol: result.chart.levelSymbol,
       sha256: result.chart.sha256,
       md5: result.chart.md5
-    }]);
+    };
+    const completedEntry = history.get(type, id, item.providerId);
+    if (completedEntry && !confirmCompletedRedownload([completedEntry])) return;
+    const enqueueResult = queueManager.enqueue([item], { allowCompleted: Boolean(completedEntry) });
     if (enqueueResult.added > 0) await queueManager.process(1);
   }
 
@@ -564,7 +584,7 @@ async function start() {
     }
     try {
       const handle = await globalThis.showDirectoryPicker({
-        id: 'bms-difficulty-table-downloader',
+        id: CONFIG.pickerIds.downloadFolder,
         mode: 'readwrite'
       });
       state.downloadDirectoryHandle = handle;
@@ -671,7 +691,7 @@ async function start() {
     }
     try {
       const handle = await globalThis.showDirectoryPicker({
-        id: 'bms-difficulty-table-library-scan',
+        id: CONFIG.pickerIds.libraryScan,
         mode: 'read'
       });
       await scanLibrarySource(handle, handle.name);
@@ -720,13 +740,16 @@ async function start() {
       onClose: destroy,
       onCandidate: handleCandidate,
       onQueueSelected(indexes) {
-        const selections = selectionsFromRows(indexes);
+        const { selections, completedEntries } = selectionPlanFromRows(indexes);
         if (!selections.length) {
           state.queueMessage = translator.t('queue.selectFirst');
           ui.renderQueue();
           return;
         }
-        queueManager.enqueue(selections);
+        if (!confirmCompletedRedownload(completedEntries)) return;
+        for (const entry of completedEntries) history.remove(entry.type, entry.id, entry.providerId);
+        const result = queueManager.enqueue(selections, { allowCompleted: completedEntries.length > 0 });
+        if (result.added > 0) ui.renderAllRows({ preserveSelection: false });
       },
       onExportSearch: exportSearchResults,
       onBatchSizeChange(value) {
@@ -746,6 +769,15 @@ async function start() {
       onRunQueue() {
         if (state.libraryScanRunning) return;
         queueManager.process(state.batchSize);
+      },
+      onConfirmBrowserDownload() {
+        queueManager.confirmBrowserDownload();
+      },
+      onRetryBrowserDownload() {
+        queueManager.retryPendingBrowserDownload();
+      },
+      onRequestNewBrowserGrant() {
+        queueManager.requestNewGrantForPending();
       },
       onStopQueue() {
         queueManager.stop();

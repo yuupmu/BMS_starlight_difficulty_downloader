@@ -6,6 +6,7 @@ const { fileKey } = require('./utils');
 function normalizeEntry(entry) {
   if (!entry || (entry.type !== 'song' && entry.type !== 'sabun') || entry.id === undefined || entry.id === null) return null;
   const requestedAt = entry.requestedAt || entry.completedAt || entry.timestamp || new Date().toISOString();
+  const status = ['saved', 'browser-confirmed'].includes(entry.status) ? entry.status : 'requested';
   return {
     key: fileKey(entry.type, entry.id, entry.providerId),
     providerId: String(entry.providerId || CONFIG.defaultProviderId),
@@ -22,7 +23,7 @@ function normalizeEntry(entry) {
     md5: String(entry.md5 || ''),
     requestedAt,
     fileName: String(entry.fileName || ''),
-    status: 'requested'
+    status
   };
 }
 
@@ -69,7 +70,8 @@ function createHistoryStore(options) {
     const entry = normalizeEntry({
       ...item,
       requestedAt: new Date().toISOString(),
-      fileName: payload.fileName || payload.filename || payload.name || item.fileName || ''
+      fileName: payload.fileName || payload.filename || payload.name || item.fileName || '',
+      status: payload.status || item.status || 'requested'
     });
     if (!entry) return null;
     map.set(entry.key, entry);

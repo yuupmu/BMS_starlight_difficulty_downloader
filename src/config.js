@@ -16,6 +16,10 @@ const CONFIG = Object.freeze({
   defaultProviderId: 'bms-library',
   panelId: 'starlight-difficulty-downloader',
   loaderId: 'starlight-difficulty-downloader-loader',
+  pickerIds: Object.freeze({
+    downloadFolder: 'bms-difficulty-table-downloader',
+    libraryScan: 'bms-library-scan'
+  }),
   searchDelayMs: 650,
   downloadDelayMs: 5000,
   downloadRetryMaxAttempts: 3,

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Browser downloads now stay at the front of the queue until the user confirms that the file was saved; browser mode is intentionally limited to one file at a time.
+- Added same-link retry without consuming a new server grant, plus an explicit warned action for requesting a replacement link.
+- Selected-folder downloads now validate non-empty file responses, reject HTML/JSON error documents and transfer-length mismatches, remove partial files after failures, and enter history only after the write completes.
+- Completion history now distinguishes verified folder writes, user-confirmed browser saves, and legacy request records.
+- Completed results can be selected again; re-queuing them requires an explicit warning confirmation before their completion records are removed.
+- Added grouped compound filters and aligned the bulk-selection action order.
+
 ## 1.2.0 — 2026-08-05
 
 - Added a user-authorized recursive scan of an extracted BMS library folder.
